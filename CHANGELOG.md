@@ -4,6 +4,10 @@ All notable changes to php-lsp are documented here.
 
 ## [Unreleased]
 
+### Dependencies
+
+- **mir updated to 0.72.1**: adopts its diagnostics-only path for raw analyzer runs and targeted symbol-name lookup for references, plus the 0.72.1 analyzer correctness and incremental-performance fixes. Salsa is updated in lockstep from 0.28.1 to 0.28.2.
+
 ## [0.25.1] — 2026-08-22
 
 ### Fixed

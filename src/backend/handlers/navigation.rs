@@ -999,11 +999,10 @@ impl Backend {
         .unwrap_or_default()
     }
 
-    /// Mir's own per-file resolution of the symbol under the cursor
-    /// (receiver types, aliases, namespaces) — its `ReferenceKind` maps 1:1
-    /// onto the index key. `None` either because the cursor is on a
-    /// declaration (mir only resolves usages) or because mir hasn't yet
-    /// analyzed a companion file this reference depends on.
+    /// Mir's targeted per-file resolution of the symbol identity under the
+    /// cursor (receiver types, aliases, namespaces). `None` means either no
+    /// codebase symbol exists there or mir has not yet analyzed a companion
+    /// file this reference depends on.
     async fn resolve_usage_symbol(
         &self,
         uri: &Uri,
@@ -1011,13 +1010,14 @@ impl Backend {
         source: &str,
         position: Position,
     ) -> Option<mir_analyzer::Name> {
-        let analysis = self.cached_analysis_async(uri).await;
-        analysis.as_deref().and_then(|a| {
-            let doc = doc_opt?;
-            let off = crate::text::word_range_at(source, position)
-                .map(|r| doc.view().byte_of_position(r.start))?;
-            a.symbol_at(off).and_then(|s| s.kind.to_name())
-        })
+        let doc = doc_opt?;
+        let offset = crate::text::word_range_at(source, position)
+            .map(|range| doc.view().byte_of_position(range.start))?;
+        let docs = Arc::clone(&self.docs);
+        let uri = uri.clone();
+        tokio::task::spawn_blocking(move || docs.mir_name_at(&uri, offset))
+            .await
+            .unwrap_or_default()
     }
 
     /// [`Self::resolve_usage_symbol`], but when the first attempt comes back

@@ -2223,6 +2223,25 @@ impl DocumentStore {
         Some(Arc::from(combined))
     }
 
+    /// Resolve only the codebase symbol identity at `offset` in `uri`.
+    ///
+    /// mir 0.72.1 provides this targeted navigation path so reference queries
+    /// do not need php-lsp's retained whole-file [`mir_analyzer::FileAnalysis`]
+    /// merely to call `symbol_at(...).kind.to_name()`. The interactive guard
+    /// pauses background writes; the retry covers a write already in flight.
+    pub fn mir_name_at(&self, uri: &Uri, offset: u32) -> Option<mir_analyzer::Name> {
+        let _interactive = self.interactive_read_guard();
+        let session = self.current_analysis_session();
+        loop {
+            match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                session.name_at(uri.as_str(), offset)
+            })) {
+                Ok(name) => return name,
+                Err(_) => std::thread::yield_now(),
+            }
+        }
+    }
+
     /// Run (or reuse) mir's per-file body analysis, retaining the full
     /// [`mir_analyzer::FileAnalysis`] — issues **and** resolved symbols — across
     /// requests. Diagnostics read `.issues`; position features call

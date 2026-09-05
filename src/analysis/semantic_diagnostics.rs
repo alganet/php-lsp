@@ -11,8 +11,8 @@ use crate::document::ast::ParsedDoc;
 use crate::lang::config::DiagnosticsConfig;
 
 /// Run semantic checks on `doc` against the supplied `AnalysisSession`.
-/// Ingests the current file, runs Pass 2 via `FileAnalyzer`, and returns LSP
-/// diagnostics filtered by `DiagnosticsConfig`.
+/// Ingests the current file through mir's diagnostics-only path and returns
+/// LSP diagnostics filtered by `DiagnosticsConfig`.
 ///
 /// Used only by `benches/semantic.rs` to measure raw analyzer cost. It is
 /// not on the production request path and skips `DocumentStore`'s salsa
@@ -29,11 +29,7 @@ pub fn semantic_diagnostics(
         return vec![];
     }
     let file: std::sync::Arc<str> = std::sync::Arc::from(uri.as_str());
-    session.ingest_file(file.clone(), doc.source_arc());
-    let source_map = php_rs_parser::source_map::SourceMap::new(doc.source());
-    let owned_program = php_ast::owned::to_owned_program(doc.program());
-    let analyzer = mir_analyzer::FileAnalyzer::new(session);
-    let analysis = analyzer.analyze(file.clone(), doc.source(), &owned_program, &source_map);
+    let analysis = session.analyze_file_diagnostics(uri.as_str(), doc.source());
     let class_issues = session.class_issues(std::slice::from_ref(&file));
     analysis
         .issues
