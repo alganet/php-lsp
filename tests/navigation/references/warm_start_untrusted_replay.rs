@@ -5,15 +5,16 @@
 //! whose issue set has an unresolved name is never immune to workspace-growth
 //! invalidation, so the first live query to touch such a file pays a full
 //! synchronous `analyze_file` (mir's changelog measured ~1.3-1.5s on a real
-//! 15K-file workspace). Mir's own recommendation: hand that list to a
-//! background `reanalyze_files_cancellable` call so the cost lands during
-//! idle time after boot, not on the user's first request.
+//! 15K-file workspace) — the cost should land in the warm phase, not on the
+//! user's first request.
 //!
-//! `warm_start_indexes` (`src/document/document_store.rs`) hands that list to
-//! a detached background thread that reanalyzes it. This test disables the
-//! ambient warm sweep (`warmAnalysis: false`) so nothing else could
-//! reanalyze the untrusted file, then asserts `warm_start_untrusted_reanalyzed`
-//! ticks up shortly after `indexReady`, with no query ever issued.
+//! `warm_start_indexes` (`src/document/document_store.rs`) returns that list
+//! and the boot flow feeds it to the front of the background reference-warm
+//! phase's queue (`warm_references_phase`). This test disables the ambient
+//! sweep (`warmAnalysis: false`) so only the phase's untrusted queue could
+//! reanalyze the untrusted file, then asserts
+//! `warm_start_untrusted_reanalyzed` ticks up shortly after `indexReady`,
+//! with no query ever issued.
 
 use super::*;
 

@@ -421,11 +421,13 @@ impl LanguageServer for Backend {
                     if is_new {
                         let docs = Arc::clone(&self.docs);
                         let open_files = self.open_files.clone();
+                        let open_urls = open_files.urls();
                         let ex = exclude_paths.clone();
                         let ip = include_paths.clone();
                         let path_clone = path.clone();
                         let client = self.client.clone();
                         let cp = cache_path.clone();
+                        let warm_analysis = self.config.load().warm_analysis;
                         tokio::spawn(async move {
                             let cache = if let Some(p) = cp {
                                 Some(crate::index::cache::WorkspaceCache::with_dir(p))
@@ -444,12 +446,20 @@ impl LanguageServer for Backend {
                             )
                             .await;
                             // Replay disk-cached index postings/subtype edges for
-                            // this folder's files, same as the initial-roots path
-                            // — without this, a folder added at runtime never gets
-                            // its warm-start seed, only the startup roots do.
+                            // this folder's files, then run the reference-warm
+                            // phase (untrusted subset, plus the ambient sweep when
+                            // configured) — same as the boot path, so a folder
+                            // added at runtime ends up as warm as the startup
+                            // roots, not just scan-mirrored.
                             super::offload::run("workspaceFolders.warmStart", move || {
                                 docs.get_workspace_index_salsa();
-                                docs.warm_start_indexes();
+                                let untrusted = docs.warm_start_indexes();
+                                docs.warm_references_phase(
+                                    untrusted,
+                                    &open_urls,
+                                    warm_analysis,
+                                    None,
+                                );
                             })
                             .await;
                             send_refresh_requests(&client).await;
@@ -839,6 +849,10 @@ impl LanguageServer for Backend {
     #[tracing::instrument(skip_all)]
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         guard_async_result("completion", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position.text_document.uri;
             let position = params.text_document_position.position;
             let cancel_rev = self.docs.write_rev();
@@ -1143,6 +1157,10 @@ impl LanguageServer for Backend {
     #[tracing::instrument(skip_all)]
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         guard_async_result("hover", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position_params.text_document.uri;
             let position = params.text_document_position_params.position;
             let source = self.get_open_text(uri).unwrap_or_default();

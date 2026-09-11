@@ -28,6 +28,10 @@ impl Backend {
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         guard_async_result("goto_definition", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position_params.text_document.uri;
             let position = params.text_document_position_params.position;
             let source = self.get_open_text(uri).unwrap_or_default();
@@ -369,6 +373,10 @@ impl Backend {
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
         guard_async_result("references", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position.text_document.uri;
             let position = params.text_document_position.position;
             let source = self.get_open_text(uri).unwrap_or_default();

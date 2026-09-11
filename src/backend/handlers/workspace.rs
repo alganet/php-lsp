@@ -582,26 +582,33 @@ impl Backend {
                 // scan-time build) and, on a returning session, sees none of
                 // the replayed freshness marks, paying the whole-workspace
                 // defs walk the replay exists to avoid. Both steps are
-                // no-ops-per-file on a first-ever run.
-                let (workspace_index_elapsed_s, warm_start_elapsed_s) = {
+                // no-ops-per-file on a first-ever run, and neither analyzes:
+                // the reference-warm phase that does is deliberately left
+                // behind readiness (see below).
+                let (workspace_index_elapsed_s, warm_start_elapsed_s, untrusted) = {
                     let pre = Arc::clone(&salsa_docs);
-                    let (workspace_index_elapsed, warm_start_elapsed) =
+                    let (workspace_index_elapsed, warm_start_elapsed, untrusted) =
                         tokio::task::spawn_blocking(move || {
                             let workspace_index_start = std::time::Instant::now();
                             pre.get_workspace_index_salsa();
                             let workspace_index_elapsed = workspace_index_start.elapsed();
 
                             let warm_start_begin = std::time::Instant::now();
-                            pre.warm_start_indexes();
+                            let untrusted = pre.warm_start_indexes();
                             let warm_start_elapsed = warm_start_begin.elapsed();
 
-                            (workspace_index_elapsed, warm_start_elapsed)
+                            (workspace_index_elapsed, warm_start_elapsed, untrusted)
                         })
                         .await
-                        .unwrap_or_default();
+                        .unwrap_or((
+                            std::time::Duration::ZERO,
+                            std::time::Duration::ZERO,
+                            Vec::new(),
+                        ));
                     (
                         workspace_index_elapsed.as_secs_f64(),
                         warm_start_elapsed.as_secs_f64(),
+                        untrusted,
                     )
                 };
                 if debug {
@@ -630,16 +637,91 @@ impl Backend {
                     config.load().diagnostics.clone(),
                     is_laravel,
                 ));
-                let sweep_open = open_files.urls();
-                drop(tokio::task::spawn_blocking(move || {
-                    // Warm mir's `analyze_file` memos across the workspace so
-                    // the first references/rename on any symbol answers from
-                    // memo hits instead of a cold multi-second analysis. Files
-                    // the user already has open (and their dependencies) warm
-                    // first.
-                    if warm_analysis {
-                        let cancel = salsa_docs.begin_warm_sweep();
-                        salsa_docs.warm_analysis_sweep(&sweep_open, &cancel);
+
+                // Reference-warm phase, behind readiness. Its `untrusted`
+                // queue always runs — mir's untrusted replay subset would
+                // otherwise pay a full synchronous `analyze_file` on the
+                // first query to touch one — while the ambient project sweep
+                // only joins the queue when `warmAnalysis` is on. Reporting
+                // work-done progress keeps the seconds it costs visible
+                // without holding a request or the readiness gate.
+                let phase_open = open_files.urls();
+                drop(tokio::spawn(async move {
+                    let token = NumberOrString::String("php-lsp/warming".to_string());
+                    client
+                        .send_request::<WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+                            token: token.clone(),
+                        })
+                        .await
+                        .ok();
+                    client
+                        .send_notification::<ProgressNotification>(ProgressParams {
+                            token: token.clone(),
+                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
+                                WorkDoneProgressBegin {
+                                    title: "php-lsp: warming reference index".to_string(),
+                                    cancellable: Some(false),
+                                    message: None,
+                                    percentage: Some(0),
+                                },
+                            )),
+                        })
+                        .await;
+                    let (phase_tx, mut phase_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<(u32, u32)>();
+                    let reporter = tokio::spawn({
+                        let client = client.clone();
+                        let token = token.clone();
+                        async move {
+                            while let Some((done, total_files)) = phase_rx.recv().await {
+                                let pct = (done * 100) / total_files.max(1);
+                                client
+                                    .send_notification::<ProgressNotification>(ProgressParams {
+                                        token: token.clone(),
+                                        value: ProgressParamsValue::WorkDone(
+                                            WorkDoneProgress::Report(WorkDoneProgressReport {
+                                                cancellable: Some(false),
+                                                message: Some(format!(
+                                                    "warming {done}/{total_files} files"
+                                                )),
+                                                percentage: Some(pct),
+                                            }),
+                                        ),
+                                    })
+                                    .await;
+                            }
+                        }
+                    });
+                    let warm_phase_begin = std::time::Instant::now();
+                    tokio::task::spawn_blocking(move || {
+                        salsa_docs.warm_references_phase(
+                            untrusted,
+                            &phase_open,
+                            warm_analysis,
+                            Some(phase_tx),
+                        );
+                    })
+                    .await
+                    .ok();
+                    let warm_phase_elapsed_s = warm_phase_begin.elapsed().as_secs_f64();
+                    let _ = reporter.await;
+                    client
+                        .send_notification::<ProgressNotification>(ProgressParams {
+                            token,
+                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
+                                WorkDoneProgressEnd {
+                                    message: Some("reference index warm".to_string()),
+                                },
+                            )),
+                        })
+                        .await;
+                    if debug {
+                        client
+                            .log_message(
+                                MessageType::INFO,
+                                format!("php-lsp: debug: warm_phase={warm_phase_elapsed_s:.3}s"),
+                            )
+                            .await;
                     }
                 }));
             });

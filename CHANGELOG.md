@@ -4,6 +4,14 @@ All notable changes to php-lsp are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Reference index warms on folder-add and PHP-version change**: adding a workspace folder or switching the PHP version now runs the same reference-warm pass boot does, instead of leaving those paths cold until the first query.
+
+### Fixed
+
+- **Interactive requests no longer compete uncontested with background warming**: hover, references, completion, and go-to-definition now mark themselves as interactive reads so a concurrent background warm/reanalysis sweep yields at its next chunk boundary instead of racing them for CPU.
+
 ### Dependencies
 
 - **mir updated to 0.72.1**: adopts its diagnostics-only path for raw analyzer runs and targeted symbol-name lookup for references, plus the 0.72.1 analyzer correctness and incremental-performance fixes. Salsa is updated in lockstep from 0.28.1 to 0.28.2.

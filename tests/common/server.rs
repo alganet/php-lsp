@@ -112,15 +112,32 @@ fn validate_lsp_spans(resp: &Value, _file_path: &str, fixture: &Fixture) {
     }
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    copy_dir_recursive_excluding(src, dst, src, &[])
+/// `copy_dir_recursive_excluding` off the runtime: the fixture copy is
+/// blocking `std::fs` work, and the server it is about to talk to shares this
+/// executor.
+async fn async_copy_dir_recursive_excluding(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    root: &std::path::Path,
+    exclude: &[String],
+) -> std::io::Result<()> {
+    let src_owned = src.to_path_buf();
+    let dst_owned = dst.to_path_buf();
+    let root_owned = root.to_path_buf();
+    let exclude_owned: Vec<String> = exclude.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        copy_dir_recursive_excluding(&src_owned, &dst_owned, &root_owned, &exclude_owned)
+    })
+    .await
+    .map_err(|err| std::io::Error::other(format!("spawn_blocking failed: {err}")))?
 }
 
-/// Like `copy_dir_recursive`, but skips top-level-relative directory names
-/// listed in `exclude` (e.g. `"vendor"`) instead of copying them just to have
-/// the workspace scan ignore them — real-world fixtures can have a `vendor/`
-/// far larger than the workspace itself, and copying it per test is wasted
-/// I/O when `excludePaths` means indexing never reads it anyway.
+/// Copies `src` into `dst`, skipping top-level-relative directory names listed
+/// in `exclude` (e.g. `"vendor"`) instead of copying them just to have the
+/// workspace scan ignore them — real-world fixtures can have a `vendor/` far
+/// larger than the workspace itself, and copying it per test is wasted I/O when
+/// `excludePaths` means indexing never reads it anyway.
 fn copy_dir_recursive_excluding(
     src: &std::path::Path,
     dst: &std::path::Path,
@@ -261,7 +278,9 @@ impl TestServer {
             source.display()
         );
         let tmp = tempfile::tempdir().expect("create TempDir");
-        copy_dir_recursive(&source, tmp.path()).expect("copy fixture");
+        async_copy_dir_recursive_excluding(&source, tmp.path(), &source, &[])
+            .await
+            .expect("copy fixture");
         let root = tmp.path().to_path_buf();
         let mut client = spawn_server();
         Self::do_initialize(&mut client, Some(&root)).await;
@@ -392,7 +411,9 @@ impl TestServer {
             })
             .unwrap_or_default();
         let tmp = tempfile::tempdir().expect("create TempDir");
-        copy_dir_recursive_excluding(&source, tmp.path(), &source, &exclude).expect("copy fixture");
+        async_copy_dir_recursive_excluding(&source, tmp.path(), &source, &exclude)
+            .await
+            .expect("copy fixture");
         let root = tmp.path().to_path_buf();
         let mut client = spawn_server();
         Self::do_initialize_with(&mut client, Some(&root), initialization_options).await;

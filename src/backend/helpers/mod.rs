@@ -210,9 +210,16 @@ impl Backend {
             .await;
         }
         let docs = Arc::clone(&self.docs);
+        let open_urls = self.open_files.urls();
+        let warm_analysis = self.config.load().warm_analysis;
+        // The new PHP version gets a fresh `AnalysisSession`, so the old
+        // session's warm memos are gone: replay disk-cached postings, then
+        // re-run the reference-warm phase so references go back to memo hits
+        // under the new version.
         let _ = tokio::task::spawn_blocking(move || {
             docs.get_workspace_index_salsa();
-            docs.warm_start_indexes();
+            let untrusted = docs.warm_start_indexes();
+            docs.warm_references_phase(untrusted, &open_urls, warm_analysis, None);
         })
         .await;
     }
