@@ -63,13 +63,13 @@ which php-lsp
 
 php-lsp communicates over stdin/stdout and works with any editor that supports custom LSP servers. Follow the guide for your editor:
 
-- **[VS Code](/editors/#vs-code)**
-- **[Neovim 0.11+](/editors/#neovim-011)**
-- **[Neovim 0.10 and older](/editors/#neovim-010-and-older)**
-- **[Zed](/editors/#zed)**
-- **[Cursor](/editors/#cursor)**
-- **[PHPStorm](/editors/#phpstorm)**
-- **[Claude Code](/editors/#claude-code)**
+- **[VS Code](../editors/#vs-code)**
+- **[Neovim 0.11+](../editors/#neovim-011)**
+- **[Neovim 0.10 and older](../editors/#neovim-010-and-older)**
+- **[Zed](../editors/#zed)**
+- **[Cursor](../editors/#cursor)**
+- **[PHPStorm](../editors/#phpstorm)**
+- **[Claude Code](../editors/#claude-code)**
 
 The key setting in every editor is the **command**: set it to the full path returned by `which php-lsp` (e.g. `/usr/local/bin/php-lsp` or `~/.cargo/bin/php-lsp`), and associate it with the `php` file type.
 
@@ -81,6 +81,6 @@ You will see a `$/progress` spinner in your editor's status bar while the initia
 
 ## Next steps
 
-- **[Configuration](/configuration/)** — set `phpVersion`, suppress noisy diagnostics, exclude generated paths
-- **[Features](/features/)** — full list of everything php-lsp supports
-- **[Architecture](/architecture/)** — internals for contributors and advanced users
+- **[Configuration](../configuration/)** — set `phpVersion`, suppress noisy diagnostics, exclude generated paths
+- **[Features](../features/)** — full list of everything php-lsp supports
+- **[Architecture](../architecture/)** — internals for contributors and advanced users

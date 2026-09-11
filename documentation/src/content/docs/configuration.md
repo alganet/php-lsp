@@ -126,4 +126,4 @@ refresh after every `textDocument/didSave`.
 }
 ```
 
-For editor-specific snippets showing where to paste these options, see [editors.md](/editors/).
+For editor-specific snippets showing where to paste these options, see [editors.md](../editors/).

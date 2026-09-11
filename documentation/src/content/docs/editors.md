@@ -213,10 +213,10 @@ Install the [php-lsp](https://plugins.jetbrains.com/plugin/31223-php-lsp) plugin
 
 The plugin handles everything automatically — no manual server configuration required. Source is available at [jorgsowa/php-lsp-phpstorm-plugin](https://github.com/jorgsowa/php-lsp-phpstorm-plugin).
 
-See [configuration.md](/configuration/) for all available options.
+See [configuration.md](../configuration/) for all available options.
 
 ---
 
 ## Configuration reference
 
-See [configuration.md](/configuration/) for all available `initializationOptions`.
+See [configuration.md](../configuration/) for all available `initializationOptions`.
