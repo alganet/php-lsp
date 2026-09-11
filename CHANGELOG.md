@@ -12,6 +12,8 @@ All notable changes to php-lsp are documented here.
 
 - **Interactive requests no longer compete uncontested with background warming**: hover, references, completion, and go-to-definition now mark themselves as interactive reads so a concurrent background warm/reanalysis sweep yields at its next chunk boundary instead of racing them for CPU.
 
+## [0.25.2] — 2026-09-11
+
 ### Dependencies
 
 - **mir updated to 0.72.1**: adopts its diagnostics-only path for raw analyzer runs and targeted symbol-name lookup for references, plus the 0.72.1 analyzer correctness and incremental-performance fixes. Salsa is updated in lockstep from 0.28.1 to 0.28.2.
