@@ -4,6 +4,8 @@ All notable changes to php-lsp are documented here.
 
 ## [Unreleased]
 
+## [0.25.3] — 2026-09-11
+
 ### Added
 
 - **Reference index warms on folder-add and PHP-version change**: adding a workspace folder or switching the PHP version now runs the same reference-warm pass boot does, instead of leaving those paths cold until the first query.
@@ -11,6 +13,10 @@ All notable changes to php-lsp are documented here.
 ### Fixed
 
 - **Interactive requests no longer compete uncontested with background warming**: hover, references, completion, and go-to-definition now mark themselves as interactive reads so a concurrent background warm/reanalysis sweep yields at its next chunk boundary instead of racing them for CPU.
+
+### Maintenance
+
+- **Re-cut the release**: the v0.25.2 release workflow installed cross-compilation targets for Rust 1.97.1 while the repository's toolchain override selected Rust 1.98.0, leaving three platform builds without their standard libraries. The release workflow now installs Rust 1.98.0 consistently.
 
 ## [0.25.2] — 2026-09-11
 
