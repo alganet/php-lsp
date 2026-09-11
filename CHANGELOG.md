@@ -4,6 +4,12 @@ All notable changes to php-lsp are documented here.
 
 ## [Unreleased]
 
+## [0.25.4] — 2026-09-11
+
+### Dependencies
+
+- **mir updated to 0.73.0**.
+
 ## [0.25.3] — 2026-09-11
 
 ### Added
