@@ -399,9 +399,12 @@ pub(super) fn resolve_receiver_class(
 }
 
 /// Resolve the class(es) of a receiver variable from mir's recorded symbol at
-/// `var_offset` (a byte offset inside the variable token), returning short
-/// names for member lookup. A union receiver yields `Foo|Bar`. `None` if mir
-/// recorded no class-typed symbol there.
+/// `var_offset` (a byte offset inside the variable token), preserving fully
+/// qualified names for member lookup. A union receiver yields
+/// `App\\Foo|Vendor\\Bar`. Keeping the namespace is essential: the workspace
+/// can contain unrelated classes with the same short name, and
+/// `all_members` uses the FQCN to select the right defining document.
+/// Returns `None` if mir recorded no class-typed symbol there.
 pub(super) fn receiver_class_at(
     analysis: &mir_analyzer::FileAnalysis,
     var_offset: u32,
@@ -409,7 +412,7 @@ pub(super) fn receiver_class_at(
     let ty = crate::types::type_query::type_at_offset(analysis, var_offset)?;
     let names: Vec<String> = crate::types::type_query::class_names(ty)
         .iter()
-        .map(|fqcn| fqn_short_name(fqcn).to_string())
+        .cloned()
         .collect();
     (!names.is_empty()).then(|| names.join("|"))
 }

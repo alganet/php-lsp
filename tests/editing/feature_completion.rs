@@ -4844,6 +4844,48 @@ async fn completion_static_resolves_use_imported_class_over_namespace_collision(
     .assert_eq(&out);
 }
 
+/// MIR reports the receiver's FQCN, and instance-member completion must retain
+/// it through lookup. Reducing `Zeta\\Widget` to `Widget` previously selected
+/// the first same-named workspace class (`Alpha\\Widget`) and exposed its
+/// members instead (php-lsp#253).
+#[tokio::test]
+async fn completion_instance_preserves_fqcn_across_namespace_collision() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vendor/pkg/target/src")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("vendor/pkg/decoy/src")).unwrap();
+    std::fs::write(
+        tmp.path().join("composer.json"),
+        r#"{"autoload":{"psr-4":{"Alpha\\":"vendor/pkg/decoy/src/","Zeta\\":"vendor/pkg/target/src/"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("vendor/pkg/target/src/Widget.php"),
+        "<?php\nnamespace Zeta;\nclass Widget { public function targetOnly(): void {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("vendor/pkg/decoy/src/Widget.php"),
+        "<?php\nnamespace Alpha;\nclass Widget { public function decoyOnly(): void {} }\n",
+    )
+    .unwrap();
+    let caller = "<?php\nnamespace Repro;\nclass Main {\n    public function run(\\Zeta\\Widget $widget): void {\n        $widget->\n    }\n}\n";
+    std::fs::write(tmp.path().join("Main.php"), caller).unwrap();
+
+    let mut s = TestServer::with_root(tmp.path()).await;
+    s.validate_syntax(false);
+    s.wait_for_index_ready().await;
+    s.open("Main.php", caller).await;
+
+    let (_, line, ch) = s.locate("Main.php", "$widget->", 0);
+    let resp = s
+        .completion("Main.php", line, ch + "$widget->".len() as u32)
+        .await;
+    let out = render_completion_ordered(&resp);
+    expect![[r#"
+        Method      targetOnly"#]]
+    .assert_eq(&out);
+}
+
 /// Typing the bare short name of a class that lives in a file which was
 /// never opened in the editor (e.g. a vendor package) must still surface it
 /// as a completion candidate, with an `additionalTextEdits` auto-import.
