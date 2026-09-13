@@ -2813,13 +2813,12 @@ impl DocumentStore {
             .copied()
     }
 
-    /// Resolve a known FQN, falling back to the short-name bucket only when
-    /// mir's direct FQN lookup has not loaded/committed the class yet.
+    /// Resolve a known FQN, checking mir's short-name bucket only for the
+    /// same FQN when the direct lookup has not loaded/committed the class yet.
     ///
-    /// Callers should use this only when they already have an FQN but still
-    /// want the previous resilience against a cold mir cache. New callers
-    /// should prefer [`Self::resolve_class_ref_by_fqn`] and reserve this for
-    /// compatibility with existing `FileIndex`-backed behavior.
+    /// A qualified name never falls through to an unrelated same-short-name
+    /// declaration: that would turn an incomplete index into an incorrect
+    /// result. A bare name retains the legacy ambiguity fallback.
     pub fn resolve_class_ref_by_fqn_or_short_name_fallback(
         &self,
         wi: &crate::db::workspace_index::WorkspaceIndexData,
@@ -2840,7 +2839,7 @@ impl DocumentStore {
         }) {
             return Some(*cr);
         }
-        candidates.first().copied()
+        (!trimmed.contains('\\')).then(|| candidates.first().copied())?
     }
 
     /// O(candidates) replacement for the old `decls_by_name`-backed linear

@@ -3822,6 +3822,36 @@ $h->$0
     .assert_eq(&out);
 }
 
+/// An immediately-instantiated explicit FQCN must remain qualified through
+/// member completion; otherwise a same-named class in another namespace can
+/// supply the wrong member list.
+#[tokio::test]
+async fn completion_direct_new_preserves_fqcn_across_namespace_collision() {
+    let mut s = TestServer::new().await;
+    s.validate_syntax(false);
+    let out = s
+        .check_completion_ordered(
+            r#"//- /AlphaWidget.php
+<?php
+namespace Alpha;
+class Widget { public function decoyOnly(): void {} }
+
+//- /ZetaWidget.php
+<?php
+namespace Zeta;
+class Widget { public function targetOnly(): void {} }
+
+//- /Main.php
+<?php
+(new \Zeta\Widget())->$0
+"#,
+        )
+        .await;
+    expect![[r#"
+        Method      targetOnly"#]]
+    .assert_eq(&out);
+}
+
 /// Instance methods are available in instance context.
 #[tokio::test]
 async fn completion_static_methods_excluded_in_instance_context() {

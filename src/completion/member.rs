@@ -5,7 +5,7 @@ use mir_analyzer::AnalysisSession;
 use tower_lsp_server::ls_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
 use crate::document::ast::ParsedDoc;
-use crate::text::{fqn_short_name, utf16_offset_to_byte};
+use crate::text::utf16_offset_to_byte;
 use crate::types::stub_members::stub_class_members;
 use crate::types::type_map::{
     ClassMembers, enclosing_class_at, enum_backing_type, is_enum, members_of_class,
@@ -365,6 +365,23 @@ pub(super) fn resolve_receiver_class(
 
     // Handle (new ClassName()) before ->
     if let Some(class_name) = extract_new_class_before_arrow(before) {
+        // Preserve an explicit FQCN and expand a direct `use` alias before
+        // member lookup. `all_members` may use a short name only as a source
+        // spelling *within an already-selected document*; using one to select
+        // the document makes same-named classes ambiguous.
+        if class_name.starts_with('\\') || class_name.contains('\\') {
+            return Some(class_name.trim_start_matches('\\').to_owned());
+        }
+        let imports = doc.file_imports();
+        if let Some(fqcn) = imports.get(&class_name) {
+            return Some(fqcn.trim_start_matches('\\').to_owned());
+        }
+        if let Some((_, fqcn)) = imports
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(&class_name))
+        {
+            return Some(fqcn.trim_start_matches('\\').to_owned());
+        }
         return Some(class_name);
     }
 
@@ -456,6 +473,7 @@ fn extract_new_class_before_arrow(text: &str) -> Option<String> {
     if class.is_empty() {
         return None;
     }
-    // Return short name
-    Some(fqn_short_name(&class).to_string())
+    // Keep the exact source spelling. The caller resolves imports and only
+    // accepts a short name when no stronger class identity is available.
+    Some(class)
 }
