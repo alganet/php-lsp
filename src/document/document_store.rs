@@ -2739,9 +2739,7 @@ impl DocumentStore {
     }
 
     /// Every class in the workspace whose own (unqualified) name is exactly
-    /// `short_name`, via mir's `classes_named` (O(1) short-name bucket,
-    /// incrementally maintained — no per-call scan over every workspace
-    /// file, unlike the mention-index-based narrowing this used to do).
+    /// `short_name`, via mir's incrementally maintained class inventory.
     ///
     /// This is the explicit short-name fallback path. Prefer
     /// [`Self::resolve_class_ref_by_fqn`] whenever the caller already has a
@@ -2753,8 +2751,14 @@ impl DocumentStore {
         short_name: &str,
     ) -> Vec<crate::db::workspace_index::ClassRef> {
         self.current_analysis_session()
-            .classes_named(short_name)
+            .all_classes()
             .into_iter()
+            .filter(|(fqcn, _)| {
+                fqcn.rsplit('\\')
+                    .next()
+                    .unwrap_or(fqcn)
+                    .eq_ignore_ascii_case(short_name)
+            })
             .filter_map(|(fqcn, _)| self.class_ref_by_fqn(wi, &fqcn))
             .collect()
     }
