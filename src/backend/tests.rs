@@ -418,34 +418,6 @@ fn build_use_import_edit_inserts_after_existing_use() {
     assert_eq!(edits[0].new_text, "use Baz\\Qux;\n");
 }
 
-// Extraction logic for "Add use import" code action — matches IssueKind::UndefinedClass message format
-#[test]
-fn undefined_class_name_extracted_from_message() {
-    let msg = "Class MyService does not exist";
-    let name = msg
-        .strip_prefix("Class ")
-        .and_then(|s| s.strip_suffix(" does not exist"))
-        .unwrap_or("")
-        .trim();
-    assert_eq!(name, "MyService");
-}
-
-// mir reports the namespace-resolved attempt (e.g. `App\Widget` for a bare
-// `Widget` reference inside `namespace App;`), not the token the developer
-// wrote — the handler must take the last `\`-segment before doing an index
-// lookup by short name, or the quick-fix never fires in namespaced files.
-#[test]
-fn undefined_class_name_strips_namespace_resolved_prefix() {
-    let msg = "Class App\\Service\\Widget does not exist";
-    let resolved = msg
-        .strip_prefix("Class ")
-        .and_then(|s| s.strip_suffix(" does not exist"))
-        .unwrap_or("")
-        .trim();
-    let short = resolved.rsplit('\\').next().unwrap_or(resolved);
-    assert_eq!(short, "Widget");
-}
-
 #[test]
 fn undefined_function_message_not_matched_by_extraction() {
     // UndefinedFunction message format must NOT match the UndefinedClass extraction,

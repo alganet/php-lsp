@@ -6,16 +6,6 @@ use tower_lsp_server::ls_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
 use crate::document::ast::ParsedDoc;
 use crate::types::resolve::{Declaration, resolve_declaration};
 
-pub(crate) fn find_fqn_for_class(
-    name: &str,
-    class_candidates_by_short_name: &dyn Fn(&str) -> Vec<crate::db::workspace_index::ClassRef>,
-    resolve_class_fqn: &dyn Fn(crate::db::workspace_index::ClassRef) -> Option<String>,
-) -> Option<String> {
-    class_candidates_by_short_name(name)
-        .into_iter()
-        .find_map(resolve_class_fqn)
-}
-
 pub(crate) fn find_fqn_for_function(
     name: &str,
     get_doc: &dyn Fn(&Uri) -> Option<Arc<ParsedDoc>>,
@@ -55,6 +45,7 @@ pub(crate) fn find_fqn_for_function(
 }
 
 /// Build a `WorkspaceEdit` that inserts `use FQN;` near the top of the file.
+#[cfg(test)]
 pub(crate) fn build_use_import_edit(source: &str, uri: &Uri, fqn: &str) -> WorkspaceEdit {
     let insert_line = find_use_insert_line(source);
     let insert_text = format!("use {fqn};\n");

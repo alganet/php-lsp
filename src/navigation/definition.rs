@@ -113,21 +113,13 @@ fn definition_name_range(sv: SourceView<'_>, decl: &Declaration<'_>) -> Range {
 /// `method_name` defined in `class_name` or any of its superclasses/traits.
 ///
 /// Returns the first match in PHP's resolution order: class itself → traits →
-/// parent → parent's traits, etc. `class_candidates` resolves a short name to
-/// every class sharing it (typically `DocumentStore::class_candidates`,
-/// mention-index-narrowed) instead of a linear scan over every workspace
-/// class.
-///
-/// Deliberately does not use the single-candidate class-ref helpers: a
-/// hierarchy walk must visit *every* class sharing a short name
-/// (workspaces commonly have several, e.g. Laravel's many
-/// `Factory`/`Request` classes), since any of them may contribute a matching
-/// trait/parent to the search.
+/// parent → parent's traits, etc. Every queued name is a canonical FQN, so
+/// lookup is an exact, constant-time index query rather than an ambiguous
+/// workspace-wide short-name search.
 pub fn find_method_in_class_hierarchy(
     class_name: &str,
     method_name: &str,
     wi: &crate::db::workspace_index::WorkspaceIndexData,
-    class_candidates_by_short_name: &dyn Fn(&str) -> Vec<crate::db::workspace_index::ClassRef>,
     get_doc: &dyn Fn(&Uri) -> Option<Arc<crate::document::ast::ParsedDoc>>,
     resolve_class_ref: &dyn Fn(&str) -> Option<crate::db::workspace_index::ClassRef>,
 ) -> Option<Location> {
@@ -139,21 +131,13 @@ pub fn find_method_in_class_hierarchy(
         if !visited.insert(current.clone()) {
             continue;
         }
-        let candidates: Vec<crate::db::workspace_index::ClassRef> = if current.contains('\\') {
-            resolve_class_ref(&current).into_iter().collect()
-        } else {
-            let short = crate::text::fqn_short_name(&current);
-            class_candidates_by_short_name(short)
+        let Some(cr) = resolve_class_ref(&current) else {
+            continue;
         };
-        for cr in &candidates {
-            let Some((uri, cls)) = wi.at(*cr) else {
+        {
+            let Some((uri, cls)) = wi.at(cr) else {
                 continue;
             };
-            if cls.name.as_ref() != current.as_str()
-                && cls.fqn.as_ref().trim_start_matches('\\') != current.as_str()
-            {
-                continue;
-            }
             for m in &cls.methods {
                 if m.name.as_ref() == method_name {
                     return Some(precise_method_location(
@@ -180,11 +164,16 @@ pub fn find_method_in_class_hierarchy(
                         None => cls.traits.iter().map(|t| t.as_ref()).collect(),
                     };
                     for trt_name in search_in {
+                        let trait_fqn = get_doc(uri)
+                            .map(|doc| {
+                                let imports = doc.file_imports();
+                                crate::navigation::moniker::resolve_fqn(&doc, trt_name, &imports)
+                            })
+                            .unwrap_or_else(|| trt_name.to_owned());
                         if let Some(loc) = find_method_in_class_hierarchy(
-                            trt_name,
+                            &trait_fqn,
                             orig,
                             wi,
-                            class_candidates_by_short_name,
                             get_doc,
                             resolve_class_ref,
                         ) {
@@ -236,7 +225,6 @@ pub fn find_property_in_class_hierarchy(
     class_name: &str,
     property_name: &str,
     wi: &crate::db::workspace_index::WorkspaceIndexData,
-    class_candidates_by_short_name: &dyn Fn(&str) -> Vec<crate::db::workspace_index::ClassRef>,
     get_doc: &dyn Fn(&Uri) -> Option<Arc<crate::document::ast::ParsedDoc>>,
     resolve_class_ref: &dyn Fn(&str) -> Option<crate::db::workspace_index::ClassRef>,
 ) -> Option<Location> {
@@ -248,21 +236,13 @@ pub fn find_property_in_class_hierarchy(
         if !visited.insert(current.clone()) {
             continue;
         }
-        let candidates: Vec<crate::db::workspace_index::ClassRef> = if current.contains('\\') {
-            resolve_class_ref(&current).into_iter().collect()
-        } else {
-            let short = crate::text::fqn_short_name(&current);
-            class_candidates_by_short_name(short)
+        let Some(cr) = resolve_class_ref(&current) else {
+            continue;
         };
-        for cr in &candidates {
-            let Some((uri, cls)) = wi.at(*cr) else {
+        {
+            let Some((uri, cls)) = wi.at(cr) else {
                 continue;
             };
-            if cls.name.as_ref() != current.as_str()
-                && cls.fqn.as_ref().trim_start_matches('\\') != current.as_str()
-            {
-                continue;
-            }
             if let Some(prop) = cls
                 .properties
                 .iter()

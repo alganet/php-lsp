@@ -1105,13 +1105,10 @@ async fn code_action_quickfix_undefined_function_cross_file() {
     .assert_eq(&out);
 }
 
-// --- Quick-fix: UndefinedClass → use FQN; ---
+// --- UndefinedClass does not guess an import from a short name. ---
 
-/// REGRESSION: the "Add use" quick-fix must find classes anywhere in the
-/// workspace index, not just among currently-open editor buffers. Widget.php
-/// is written to disk and indexed via the workspace scan but never opened —
-/// this reproduces the common case of importing a class whose file isn't
-/// already open in the editor.
+/// A workspace class with the same short name is not evidence that it is the
+/// intended missing FQN, so no import quick-fix is offered.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_not_open_in_editor() {
     let mut server = TestServer::with_fixture("psr4-mini").await;
@@ -1144,22 +1141,13 @@ async fn code_action_quickfix_undefined_class_not_open_in_editor() {
         .cloned();
 
     assert!(
-        action.is_some(),
-        "expected 'Add use' quick-fix for a class indexed but not open in the editor, got: {resp:#}"
+        action.is_none(),
+        "unexpected ambiguous import quick-fix: {resp:#}"
     );
-    let a = action.unwrap();
-    let out = canonicalize_workspace_edit(&a["edit"], &server.uri(""));
-    expect![[r#"
-        // src/main.php
-        2:0-2:0 → "use App\\Service\\Widget;\n""#]]
-    .assert_eq(&out);
 }
 
-/// REGRESSION: mir reports `UndefinedClass` with the namespace-resolved
-/// attempt (e.g. `App\Widget` for a bare `Widget` reference inside
-/// `namespace App;`), not the bare token the developer wrote. The quick-fix
-/// must strip that prefix before looking the short name up in the workspace
-/// index, or it silently never fires for any namespaced consumer file.
+/// The namespace-resolved diagnostic FQN is retained; it is never reduced to
+/// a short name to find an arbitrary import candidate.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_in_namespaced_file() {
     let mut server = TestServer::new().await;
@@ -1186,28 +1174,19 @@ async fn code_action_quickfix_undefined_class_in_namespaced_file() {
         .cloned();
 
     assert!(
-        action.is_some(),
-        "expected 'Add use' quick-fix in a namespaced consumer file, got: {resp:#}"
+        action.is_none(),
+        "unexpected ambiguous import quick-fix: {resp:#}"
     );
-    let a = action.unwrap();
-    let out = canonicalize_workspace_edit(&a["edit"], &server.uri(""));
-    expect![[r#"
-        // main.php
-        2:0-2:0 → "use App\\Service\\Widget;\n""#]]
-    .assert_eq(&out);
 }
 
 // ============================================================================
 // `context.only` FILTERING
 // ============================================================================
 //
-// `organize_imports_action` doesn't depend on the request range, so a file
-// with an unsorted `use` block plus an undefined-class reference always
-// offers both a `quickfix` and a `source.organizeImports` action for the
-// same request — a solid fixture for asserting `context.only` filtering.
+// `organize_imports_action` doesn't depend on the request range. An ambiguous
+// undefined class must not add an import quick-fix to the response.
 
-/// Sanity check that both actions actually show up unfiltered, so the
-/// filtering tests below are pinning real behavior, not an empty response.
+/// Sanity check that the safe organize-imports action shows up unfiltered.
 #[tokio::test]
 async fn code_action_only_absent_returns_both_kinds() {
     let mut server = TestServer::new().await;
@@ -1230,10 +1209,6 @@ async fn code_action_only_absent_returns_both_kinds() {
         .iter()
         .map(|a| a["kind"].as_str().unwrap_or(""))
         .collect();
-    assert!(
-        kinds.contains(&"quickfix"),
-        "expected an 'Add use' quickfix, got {kinds:?}"
-    );
     assert!(
         kinds.contains(&"source.organizeImports"),
         "expected an organize-imports action, got {kinds:?}"
@@ -1264,14 +1239,7 @@ async fn code_action_only_quickfix_excludes_organize_imports() {
         .iter()
         .map(|a| a["kind"].as_str().unwrap_or(""))
         .collect();
-    assert!(
-        !kinds.is_empty(),
-        "expected the Add-use quickfix to survive filtering"
-    );
-    assert!(
-        kinds.iter().all(|k| *k == "quickfix"),
-        "only=[quickfix] should filter out non-quickfix actions, got {kinds:?}"
-    );
+    assert!(kinds.is_empty(), "unexpected quickfixes: {kinds:?}");
 }
 
 #[tokio::test]
@@ -1304,7 +1272,7 @@ async fn code_action_only_organize_imports_excludes_quickfix() {
     );
     assert!(
         kinds.iter().all(|k| *k == "source.organizeImports"),
-        "only=[source.organizeImports] should filter out the quickfix, got {kinds:?}"
+        "only=[source.organizeImports] should retain only organize-imports actions, got {kinds:?}"
     );
 }
 

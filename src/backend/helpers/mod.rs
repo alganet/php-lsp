@@ -360,36 +360,27 @@ impl Backend {
         None
     }
 
-    /// Pre-load via PSR-4 any direct supertypes of `item_name` that are not yet
+    /// Pre-load via PSR-4 any direct supertypes of `item_fqn` that are not yet
     /// present in the workspace index, so the next call to `workspace_index_async`
     /// will include them. Only one level is loaded (direct parents / interfaces);
     /// the type-hierarchy feature only ever requests one level at a time.
     /// Returns `true` when at least one new file was ingested.
     pub(super) async fn ensure_direct_supertypes_loaded(
         &self,
-        item_name: &str,
-        item_fqn: Option<&str>,
+        item_fqn: &str,
         wi: &crate::db::workspace_index::WorkspaceIndexData,
     ) -> bool {
-        let refs = if let Some(fqn) = item_fqn {
-            self.docs
-                .resolve_class_ref_by_fqn_or_short_name_fallback(wi, fqn)
-                .into_iter()
-                .collect()
-        } else {
-            self.docs.class_candidates_by_short_name(wi, item_name)
-        };
-        if refs.is_empty() {
+        let Some(class_ref) = self.docs.resolve_class_ref_by_fqn(wi, item_fqn) else {
             return false;
-        }
+        };
 
         let mut ingested = false;
-        for r in &refs {
-            let Some((uri, cls)) = wi.at(*r) else {
-                continue;
+        {
+            let Some((uri, cls)) = wi.at(class_ref) else {
+                return false;
             };
             let Some(doc) = self.docs.get_doc_salsa(uri) else {
-                continue;
+                return false;
             };
             let imports = doc.file_imports();
 
@@ -403,11 +394,7 @@ impl Backend {
 
             for name in super_names {
                 let fqn = crate::navigation::moniker::resolve_fqn(&doc, &name, &imports);
-                if self
-                    .docs
-                    .resolve_class_ref_by_fqn_or_short_name_fallback(wi, &fqn)
-                    .is_some()
-                {
+                if self.docs.resolve_class_ref_by_fqn(wi, &fqn).is_some() {
                     continue;
                 }
                 let path = match self.psr4.load().resolve(&fqn) {

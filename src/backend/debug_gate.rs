@@ -63,7 +63,7 @@ pub const GATE_SEMANTIC_TOKENS_RANGE: &str = "semanticTokensRange.walk";
 pub const GATE_SEMANTIC_TOKENS_FULL_DELTA: &str = "semanticTokensFullDelta.walk";
 /// Gate section around `linked_editing_range`'s highlight/class-scoping walk.
 pub const GATE_LINKED_EDITING_RANGE: &str = "linkedEditingRange.walk";
-/// Gate section around `goto_type_definition`'s exact/short-name fallback chain.
+/// Gate section around `goto_type_definition`'s exact-resolution chain.
 pub const GATE_GOTO_TYPE_DEFINITION: &str = "gotoTypeDefinition.walk";
 /// Gate section around type-hierarchy lookup/result construction.
 pub const GATE_TYPE_HIERARCHY: &str = "typeHierarchy.lookup";

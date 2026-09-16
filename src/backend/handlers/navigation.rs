@@ -124,17 +124,13 @@ impl Backend {
                     let word_task = word.clone();
                     let found = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             let loc = find_method_in_class_hierarchy(
                                 class_fqn_task.as_ref(),
                                 &word_task,
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )?;
@@ -186,17 +182,13 @@ impl Backend {
                     let wi_task = Arc::clone(&wi);
                     let loc = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             find_property_in_class_hierarchy(
                                 class_fqn_arc.as_ref(),
                                 property_name_arc.as_ref(),
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )
@@ -253,17 +245,13 @@ impl Backend {
                     let word_task = word.clone();
                     let found = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             let loc = find_method_in_class_hierarchy(
                                 &first_cls_task,
                                 &word_task,
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )?;
@@ -289,7 +277,7 @@ impl Backend {
                     // walk the PSR-4 vendor hierarchy starting from there.
                     let class_fqn = self
                         .docs
-                        .resolve_class_ref_by_fqn_or_short_name_fallback(&wi2, &first_cls)
+                        .resolve_class_ref_by_fqn(&wi2, &first_cls)
                         .and_then(|cr| {
                             wi2.at(cr)
                                 .map(|(_, cls)| cls.fqn.trim_start_matches('\\').to_owned())
@@ -1151,26 +1139,18 @@ impl Backend {
             },
         };
         let mut exact = Vec::new();
-        let mut by_name = Vec::new();
         match symbol {
             mir_analyzer::Name::Class(fqn) => {
                 let target = fqn.trim_start_matches('\\');
-                for r in &self.docs.class_candidates_by_short_name(&ws, short) {
-                    let Some((uri, cls)) = ws.at(*r) else {
-                        continue;
-                    };
-                    if cls.name.as_ref() != short {
-                        continue;
-                    }
-                    let loc = Location {
+                if let Some((uri, cls)) = self
+                    .docs
+                    .class_ref_by_fqn(&ws, target)
+                    .and_then(|r| ws.at(r))
+                {
+                    exact.push(Location {
                         uri: uri.clone(),
                         range: name_range(cls.start_line, cls.name_char),
-                    };
-                    if cls.fqn.trim_start_matches('\\') == target {
-                        exact.push(loc);
-                    } else {
-                        by_name.push(loc);
-                    }
+                    });
                 }
             }
             mir_analyzer::Name::Function(fqn) => {
@@ -1186,28 +1166,13 @@ impl Backend {
                         };
                         if f.fqn.trim_start_matches('\\') == target {
                             exact.push(loc);
-                        } else {
-                            by_name.push(loc);
                         }
                     }
                 }
             }
             _ => {}
         }
-        if !exact.is_empty() {
-            exact
-        } else if word.contains('\\') {
-            // A qualified cursor word already names its own namespace, so a
-            // same-short-name declaration elsewhere that its FQN doesn't
-            // match is a different symbol, not a stale-index near-miss —
-            // e.g. `use App\Logger;` referring to nothing real must not
-            // spuriously match an unrelated global `class Logger {}`.
-            // Bare-word cursors carry no such namespace claim, so their
-            // by-name fallback stands.
-            Vec::new()
-        } else {
-            by_name
-        }
+        exact
     }
 
     pub(crate) async fn handle_linked_editing_range(

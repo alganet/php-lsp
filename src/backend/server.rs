@@ -26,10 +26,9 @@ use crate::navigation::declaration::{goto_declaration, goto_declaration_from_ind
 use crate::navigation::moniker::moniker_at;
 use crate::navigation::type_definition::{
     goto_type_definition_exact, goto_type_definition_from_index_exact,
-    goto_type_definition_from_index_short_name_fallback, goto_type_definition_short_name_fallback,
 };
 use crate::navigation::type_hierarchy::{
-    prepare_type_hierarchy_from_workspace, subtypes_of_mir_backed, supertypes_of_from_workspace,
+    prepare_type_hierarchy_from_fqn, subtypes_of_mir_backed, supertypes_of_from_workspace,
 };
 
 use crate::analysis::code_lens::code_lenses;
@@ -878,12 +877,15 @@ impl LanguageServer for Backend {
             let wi_for_class_search = Arc::clone(&wi);
             let uri_for_class_search = uri.clone();
             let docs_for_lookup = Arc::clone(&self.docs);
+            let doc_for_lookup = Arc::clone(&doc);
+            let imports_for_lookup = imports.clone();
             let find_class_doc_fn = move |name: &str| -> Option<Arc<ParsedDoc>> {
-                let cr = if name.trim_start_matches('\\').contains('\\') {
-                    docs_for_lookup.resolve_class_ref_by_fqn_or_short_name_fallback(&wi, name)?
-                } else {
-                    docs_for_lookup.resolve_class_ref_by_short_name(&wi, name)?
-                };
+                let fqn = crate::navigation::moniker::resolve_fqn(
+                    &doc_for_lookup,
+                    name,
+                    &imports_for_lookup,
+                );
+                let cr = docs_for_lookup.resolve_class_ref_by_fqn(&wi, &fqn)?;
                 let (uri, _) = wi.at(cr)?;
                 docs_for_lookup.get_doc_salsa(uri)
             };
@@ -1210,12 +1212,15 @@ impl LanguageServer for Backend {
             let mut wi_cache: Option<Arc<crate::db::workspace_index::WorkspaceIndexData>> = None;
             let wi = self.workspace_index_cached(&mut wi_cache).await;
             let docs_for_lookup = Arc::clone(&self.docs);
+            let imports_for_lookup = doc.file_imports();
+            let doc_for_lookup = Arc::clone(&doc);
             let find_class_doc_fn = move |name: &str| -> Option<Arc<ParsedDoc>> {
-                let cr = if name.trim_start_matches('\\').contains('\\') {
-                    docs_for_lookup.resolve_class_ref_by_fqn_or_short_name_fallback(&wi, name)?
-                } else {
-                    docs_for_lookup.resolve_class_ref_by_short_name(&wi, name)?
-                };
+                let fqn = crate::navigation::moniker::resolve_fqn(
+                    &doc_for_lookup,
+                    name,
+                    &imports_for_lookup,
+                );
+                let cr = docs_for_lookup.resolve_class_ref_by_fqn(&wi, &fqn)?;
                 let (uri, _) = wi.at(cr)?;
                 docs_for_lookup.get_doc_salsa(uri)
             };
@@ -1243,19 +1248,13 @@ impl LanguageServer for Backend {
             // `use Foo as Bar` works even when Foo is only in the index.
             if let Some(word) = crate::text::word_at_position(&source, position) {
                 let wi = self.workspace_index_cached(&mut wi_cache).await;
-                let resolve_class_ref_fallback = |name: &str| {
-                    if name.trim_start_matches('\\').contains('\\') {
-                        self.docs
-                            .resolve_class_ref_by_fqn_or_short_name_fallback(&wi, name)
-                    } else {
-                        self.docs.resolve_class_ref_by_short_name(&wi, name)
-                    }
-                };
                 let fallback_class_fqcn = |name: &str| {
-                    resolve_class_ref_fallback(name).and_then(|cr| {
-                        wi.at(cr)
-                            .map(|(_, cls)| cls.fqn.trim_start_matches('\\').to_string())
-                    })
+                    self.docs
+                        .resolve_class_ref_by_fqn(&wi, name)
+                        .and_then(|cr| {
+                            wi.at(cr)
+                                .map(|(_, cls)| cls.fqn.trim_start_matches('\\').to_string())
+                        })
                 };
                 // Try the literal word first.
                 if let Some(fqcn) = fallback_class_fqcn(&word)
@@ -1873,16 +1872,15 @@ impl LanguageServer for Backend {
             let docs = Arc::clone(&self.docs);
             let wi = self.workspace_index_async().await;
 
-            // Every fallback pass below is CPU-bound — the exact/short-name
-            // passes walk every open doc's AST, the index passes do lookup
-            // work over the aggregated index — so run the whole chain off
+            // Every exact-resolution pass below is CPU-bound — the open-doc
+            // pass walks ASTs and the index pass reads the aggregated index —
+            // so run the whole chain off
             // the async runtime worker in one hop, matching hover.
             let response = self
                 .blocking_gated(super::debug_gate::GATE_GOTO_TYPE_DEFINITION, move || {
                     // Exact FQN/namespace matches (open docs, then background index)
-                    // outrank *either* source's short-name fallback, so an unrelated
-                    // same-short-named class in another open file can never preempt
-                    // a correctly-namespaced match that only lives in the index.
+                    // ensure an unrelated same-short-named class in another open
+                    // file can never preempt a correctly-namespaced target.
                     let mut results = goto_type_definition_exact(
                         &source,
                         &doc,
@@ -1905,33 +1903,6 @@ impl LanguageServer for Backend {
                             &get_doc,
                         );
                     }
-                    if results.is_empty() {
-                        results = goto_type_definition_short_name_fallback(
-                            &source,
-                            &doc,
-                            analysis.as_deref(),
-                            &open_docs,
-                            position,
-                        );
-                    }
-                    if results.is_empty() {
-                        let class_candidate_uris = |short: &str| {
-                            docs.class_candidates_by_short_name(&wi, short)
-                                .into_iter()
-                                .filter_map(|cr| wi.at(cr).map(|(uri, _)| uri.clone()))
-                                .collect()
-                        };
-                        let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                        results = goto_type_definition_from_index_short_name_fallback(
-                            &source,
-                            &doc,
-                            analysis.as_deref(),
-                            position,
-                            &class_candidate_uris,
-                            &get_doc,
-                        );
-                    }
-
                     // Format response: scalar for single result, array for multiple, none for empty
                     match results.len() {
                         0 => None,
@@ -1955,22 +1926,19 @@ impl LanguageServer for Backend {
         guard_async_result("prepare_type_hierarchy", async move {
             let uri = &params.text_document_position_params.text_document.uri;
             let position = params.text_document_position_params.position;
-            let source = self.get_open_text(uri).unwrap_or_default();
-            // Phase J: use the salsa-memoized aggregate, mention-index-narrowed.
             let wi = self.workspace_index_async().await;
-            let docs = Arc::clone(&self.docs);
-            let uri = uri.clone();
+            let class_ref = self
+                .get_doc(uri)
+                .and_then(|doc| {
+                    word_at_position(doc.source(), position).map(|word| {
+                        let imports = doc.file_imports();
+                        crate::navigation::moniker::resolve_fqn(&doc, &word, &imports)
+                    })
+                })
+                .and_then(|fqn| self.docs.class_ref_by_fqn(&wi, &fqn));
             let item = self
                 .blocking_gated(super::debug_gate::GATE_TYPE_HIERARCHY, move || {
-                    let class_candidates =
-                        |short: &str| docs.class_candidates_by_short_name(&wi, short);
-                    prepare_type_hierarchy_from_workspace(
-                        &source,
-                        &uri,
-                        &wi,
-                        position,
-                        &class_candidates,
-                    )
+                    prepare_type_hierarchy_from_fqn(class_ref?, &wi)
                 })
                 .await
                 .flatten();
@@ -1988,13 +1956,10 @@ impl LanguageServer for Backend {
             // Pre-load any direct vendor supertypes via PSR-4 so they appear in the
             // workspace index before the lookup runs.
             let wi = self.workspace_index_async().await;
-            let loaded_new = self
-                .ensure_direct_supertypes_loaded(
-                    &params.item.name,
-                    crate::navigation::type_hierarchy::item_fqn(&params.item),
-                    &wi,
-                )
-                .await;
+            let Some(item_fqn) = crate::navigation::type_hierarchy::item_fqn(&params.item) else {
+                return Ok(None);
+            };
+            let loaded_new = self.ensure_direct_supertypes_loaded(item_fqn, &wi).await;
             let wi = if loaded_new {
                 self.workspace_index_async().await
             } else {
@@ -2004,18 +1969,9 @@ impl LanguageServer for Backend {
             let item = params.item;
             let result = self
                 .blocking_gated(super::debug_gate::GATE_TYPE_HIERARCHY, move || {
-                    let class_candidates =
-                        |short: &str| docs.class_candidates_by_short_name(&wi, short);
                     let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                    let resolve_class_ref =
-                        |fqn: &str| docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi, fqn);
-                    supertypes_of_from_workspace(
-                        &item,
-                        &wi,
-                        &class_candidates,
-                        &get_doc,
-                        &resolve_class_ref,
-                    )
+                    let resolve_class_ref = |fqn: &str| docs.resolve_class_ref_by_fqn(&wi, fqn);
+                    supertypes_of_from_workspace(&item, &wi, &get_doc, &resolve_class_ref)
                 })
                 .await
                 .unwrap_or_default();
@@ -2036,30 +1992,19 @@ impl LanguageServer for Backend {
             let wi = self.workspace_index_async().await;
             let docs = Arc::clone(&self.docs);
             let item = params.item;
+            let Some(item_fqn) = crate::navigation::type_hierarchy::item_fqn(&item) else {
+                return Ok(None);
+            };
+            let item_fqn = item_fqn.to_owned();
             let result = self
                 .blocking_gated(super::debug_gate::GATE_TYPE_HIERARCHY, move || {
-                    let item_fqn = crate::navigation::type_hierarchy::item_fqn(&item)
-                        .map(str::to_string)
-                        .or_else(|| {
-                            // Fallback for older clients/items lacking `data.fqn`.
-                            let candidates = docs.class_candidates_by_short_name(&wi, &item.name);
-                            candidates
-                                .iter()
-                                .filter_map(|r| wi.at(*r))
-                                .find(|(u, _)| **u == item.uri)
-                                .or_else(|| candidates.first().and_then(|r| wi.at(*r)))
-                                .map(|(_, cls)| cls.fqn.as_ref().to_string())
-                        });
-                    let subtype_urls = item_fqn
-                        .as_deref()
-                        .map(|f| docs.class_subtype_urls(f))
-                        .unwrap_or_default();
+                    let subtype_urls = docs.class_subtype_urls(&item_fqn);
                     let mention_candidates =
                         |name: &str| docs.declaration_candidate_files(&wi, name);
                     let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
                     subtypes_of_mir_backed(
                         &item,
-                        item_fqn.as_deref(),
+                        &item_fqn,
                         &wi,
                         &subtype_urls,
                         &mention_candidates,

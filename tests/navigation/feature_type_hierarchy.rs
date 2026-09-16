@@ -298,7 +298,7 @@ class UserRepository$0 extends Repository {}
     expect!["Repository (Class) @ src/Repository.php:1"].assert_eq(&out);
 }
 
-/// Supertypes resolves via short-name lookup.  Two classes with the same short
+/// Supertypes resolves via canonical FQN lookup. Two classes with the same short
 /// name but different namespaces both appear as candidates; the test documents
 /// that supertypes returns *a* match rather than asserting a specific FQN.
 #[tokio::test]
