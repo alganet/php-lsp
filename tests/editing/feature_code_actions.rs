@@ -579,7 +579,7 @@ class Config {
 async fn promote_action_resolve_no_trailing_newline() {
     let mut server = TestServer::new().await;
     let out = server
-        .check_code_actions(
+        .check_code_action_apply(
             r#"<?php
 class Foo {
     public string $name$0;
@@ -587,11 +587,15 @@ class Foo {
         $this->name = $name;
     }
 }"#,
+            "Promote constructor parameter",
         )
         .await;
     expect![[r#"
-        refactor         Generate getter/setter
-        refactor         Promote constructor parameter"#]]
+        <?php
+        class Foo {
+            public function __construct(public string $name) {
+            }
+        }"#]]
     .assert_eq(&out);
 }
 
