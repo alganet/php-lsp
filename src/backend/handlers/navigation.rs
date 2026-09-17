@@ -1155,19 +1155,15 @@ impl Backend {
             }
             mir_analyzer::Name::Function(fqn) => {
                 let target = fqn.trim_start_matches('\\');
-                for (uri, idx) in &ws.files {
-                    for f in &idx.functions {
-                        if f.name.as_ref() != short {
-                            continue;
-                        }
-                        let loc = Location {
-                            uri: uri.clone(),
-                            range: name_range(f.start_line, f.name_char),
-                        };
-                        if f.fqn.trim_start_matches('\\') == target {
-                            exact.push(loc);
-                        }
-                    }
+                if let Some((uri, function)) = self
+                    .docs
+                    .function_ref_by_fqn(&ws, target)
+                    .and_then(|r| ws.function_at(r))
+                {
+                    exact.push(Location {
+                        uri: uri.clone(),
+                        range: name_range(function.start_line, function.name_char),
+                    });
                 }
             }
             _ => {}

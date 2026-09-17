@@ -2778,6 +2778,33 @@ impl DocumentStore {
         self.class_ref_by_fqn(wi, fqn)
     }
 
+    /// O(1) resolution of a known FQN to its declaring global function via
+    /// mir's incrementally-maintained definition index. As with
+    /// [`Self::class_ref_by_fqn`], validate the result against the current
+    /// workspace snapshot before returning its compact index back-pointer.
+    pub fn function_ref_by_fqn(
+        &self,
+        wi: &crate::db::workspace_index::WorkspaceIndexData,
+        fqn: &str,
+    ) -> Option<crate::db::workspace_index::FunctionRef> {
+        let trimmed = fqn.trim_start_matches('\\');
+        let name = mir_analyzer::Name::function(trimmed.to_string());
+        let loc = self
+            .current_analysis_session()
+            .definition_of_cached(&name)
+            .ok()?;
+        let &file_idx = wi.path_to_file_idx.get(loc.file.as_ref())?;
+        let (_, idx) = wi.files.get(file_idx as usize)?;
+        let function_idx = idx
+            .functions
+            .iter()
+            .position(|function| function.fqn.trim_start_matches('\\') == trimmed)?;
+        Some(crate::db::workspace_index::FunctionRef {
+            file: file_idx,
+            function: function_idx as u32,
+        })
+    }
+
     /// O(candidates) replacement for the old `decls_by_name`-backed linear
     /// scan: find a declaration named `word` anywhere in the workspace,
     /// optionally excluding one file (the current document, which the

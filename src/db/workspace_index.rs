@@ -46,6 +46,14 @@ pub struct ClassRef {
     pub class: u32,
 }
 
+/// Back-pointer into `WorkspaceIndexData.files`: `(file_idx, function_idx)`
+/// where `function_idx` indexes into `files[file_idx].1.functions`.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionRef {
+    pub file: u32,
+    pub function: u32,
+}
+
 /// Aggregated workspace-level index. Constructed once per salsa revision by
 /// `workspace_index` and held behind an `Arc` for cheap cross-request sharing.
 pub struct WorkspaceIndexData {
@@ -99,6 +107,16 @@ impl WorkspaceIndexData {
         let (uri, idx) = self.files.get(r.file as usize)?;
         let cls = idx.classes.get(r.class as usize)?;
         Some((uri, cls))
+    }
+
+    /// Resolve a `FunctionRef` back to its `(uri, function_def)` pair.
+    pub fn function_at(
+        &self,
+        r: FunctionRef,
+    ) -> Option<(&Uri, &crate::index::file_index::FunctionDef)> {
+        let (uri, idx) = self.files.get(r.file as usize)?;
+        let function = idx.functions.get(r.function as usize)?;
+        Some((uri, function))
     }
 
     /// Return the canonical FQN when exactly one workspace class has `name`
