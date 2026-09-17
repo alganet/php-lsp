@@ -360,7 +360,8 @@ fn extract_receiver_before(text: &[char], paren_pos: usize, name_len: usize) -> 
     } else {
         end - 2
     };
-    let is_recv_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    // Keep namespace separators: the receiver may be an explicit FQCN.
+    let is_recv_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '\\';
     let mut recv_start = recv_end;
     while recv_start > 0 && is_recv_char(text[recv_start - 1]) {
         recv_start -= 1;
@@ -418,17 +419,22 @@ fn find_doc_method_params_in_doc(
     class_name: &str,
     method_name: &str,
 ) -> Option<String> {
-    find_doc_method_params_in_doc_impl(stmts, fqn_short_name(class_name), method_name)
+    find_doc_method_params_in_doc_impl(stmts, class_name, method_name, None)
 }
 
 fn find_doc_method_params_in_doc_impl(
     stmts: &[Stmt<'_, '_>],
     class_name: &str,
     method_name: &str,
+    namespace: Option<&str>,
 ) -> Option<String> {
     for stmt in stmts {
         match &stmt.kind {
-            StmtKind::Class(c) if c.name.as_ref().and_then(|n| n.as_str()) == Some(class_name) => {
+            StmtKind::Class(c)
+                if c.name.as_ref().is_some_and(|name| {
+                    class_matches_declaration(class_name, &name.to_string(), namespace)
+                }) =>
+            {
                 let method = parse_docblock(c.doc_comment?.text)
                     .methods
                     .into_iter()
@@ -462,8 +468,15 @@ fn find_doc_method_params_in_doc_impl(
             }
             StmtKind::Namespace(ns) => {
                 if let NamespaceBody::Braced(inner) = &ns.body
-                    && let Some(params) =
-                        find_doc_method_params_in_doc_impl(&inner.stmts, class_name, method_name)
+                    && let Some(params) = find_doc_method_params_in_doc_impl(
+                        &inner.stmts,
+                        class_name,
+                        method_name,
+                        ns.name
+                            .as_ref()
+                            .map(|name| name.to_string_repr())
+                            .as_deref(),
+                    )
                 {
                     return Some(params);
                 }
@@ -472,6 +485,20 @@ fn find_doc_method_params_in_doc_impl(
         }
     }
     None
+}
+
+/// Match a semantic class identity against a declaration in its namespace.
+/// Short names are only a deliberate fallback for unresolved source names.
+fn class_matches_declaration(target: &str, declared: &str, namespace: Option<&str>) -> bool {
+    let target = target.trim_start_matches('\\');
+    if !target.contains('\\') {
+        return target.eq_ignore_ascii_case(declared);
+    }
+    let declared_fqcn = namespace
+        .filter(|namespace| !namespace.is_empty())
+        .map(|namespace| format!("{namespace}\\{declared}"))
+        .unwrap_or_else(|| declared.to_owned());
+    target.eq_ignore_ascii_case(&declared_fqcn)
 }
 
 /// `has_receiver` gates class/interface/trait/enum member matching: a bare

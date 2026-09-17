@@ -98,8 +98,7 @@ fn resolve_type_at_cursor(
 /// multiple elements for union types (e.g., Admin|User).
 /// First pass: look only in files whose namespace + short class name matches
 /// the cursor's resolved FQN exactly. Callers should try this — and the index
-/// equivalent, `goto_type_definition_from_index_exact` — before falling back
-/// to [`goto_type_definition_short_name_fallback`], so an unrelated
+/// equivalent, `goto_type_definition_from_index_exact`, so an unrelated
 /// same-short-named class in another open file/namespace can never preempt a
 /// correctly-namespaced match that only lives in the background index.
 pub fn goto_type_definition_exact(
@@ -127,39 +126,6 @@ pub fn goto_type_definition_exact(
                         range,
                     },
                 )
-            })
-            .collect::<Vec<_>>()
-    })
-}
-
-/// Fallback: short-name search across all open docs, ignoring namespace.
-/// Skipped by callers when the class name came from an import: imports take
-/// precedence, so if the exact pass didn't find it in the imported namespace,
-/// don't fall back to an ambiguous short-name search.
-pub fn goto_type_definition_short_name_fallback(
-    source: &str,
-    doc: &ParsedDoc,
-    analysis: Option<&FileAnalysis>,
-    all_docs: &[(Uri, Arc<ParsedDoc>)],
-    position: Position,
-) -> Vec<Location> {
-    let Some((imports, class_name)) = resolve_type_at_cursor(source, doc, analysis, position)
-    else {
-        return Vec::new();
-    };
-    if imports.values().any(|v| v == &class_name) {
-        return Vec::new();
-    }
-    collect_short_name_type_definition_locations(&class_name, |short| {
-        all_docs
-            .iter()
-            .filter_map(|(uri, other_doc)| {
-                find_class_range(other_doc.view(), &other_doc.program().stmts, short).map(|range| {
-                    Location {
-                        uri: uri.clone(),
-                        range,
-                    }
-                })
             })
             .collect::<Vec<_>>()
     })
@@ -442,10 +408,7 @@ fn find_class_range(sv: SourceView<'_>, stmts: &[Stmt<'_, '_>], name: &str) -> O
     None
 }
 
-/// First pass: look for an exact FQN match in `FileIndex` entries (high
-/// priority). Callers should try this — and the open-docs equivalent,
-/// [`goto_type_definition_exact`] — before either's short-name fallback; see
-/// [`goto_type_definition_short_name_fallback`] for why.
+/// Look for an exact FQN match in `FileIndex` entries.
 pub fn goto_type_definition_from_index_exact(
     source: &str,
     doc: &ParsedDoc,
@@ -474,38 +437,6 @@ pub fn goto_type_definition_from_index_exact(
     })
 }
 
-/// Fallback: short-name match in `FileIndex` entries, ignoring namespace
-/// (lower priority, may be ambiguous). Skipped when the class name came from
-/// an import: imports take precedence, so if the exact pass didn't find it
-/// in the imported namespace, don't fall back to an ambiguous short-name
-/// search.
-pub fn goto_type_definition_from_index_short_name_fallback(
-    source: &str,
-    doc: &ParsedDoc,
-    analysis: Option<&FileAnalysis>,
-    position: Position,
-    class_candidate_uris: &dyn Fn(&str) -> Vec<Uri>,
-    get_doc: &dyn Fn(&Uri) -> Option<Arc<ParsedDoc>>,
-) -> Vec<Location> {
-    let Some((imports, class_name)) = resolve_type_at_cursor(source, doc, analysis, position)
-    else {
-        return Vec::new();
-    };
-    if imports.values().any(|v| v == &class_name) {
-        return Vec::new();
-    }
-    collect_short_name_type_definition_locations(&class_name, |short| {
-        class_candidate_uris(short)
-            .into_iter()
-            .filter_map(|uri| {
-                let other_doc = get_doc(&uri)?;
-                let range = find_class_range(other_doc.view(), &other_doc.program().stmts, short)?;
-                Some(Location { uri, range })
-            })
-            .collect::<Vec<_>>()
-    })
-}
-
 fn collect_exact_type_definition_locations<F>(class_name: &str, mut resolve: F) -> Vec<Location>
 where
     F: FnMut(&str) -> Vec<Location>,
@@ -513,21 +444,6 @@ where
     let mut results = Vec::new();
     for candidate in type_candidates(class_name) {
         results.extend(resolve(candidate));
-    }
-    dedup_locations(&mut results);
-    results
-}
-
-fn collect_short_name_type_definition_locations<F>(
-    class_name: &str,
-    mut resolve: F,
-) -> Vec<Location>
-where
-    F: FnMut(&str) -> Vec<Location>,
-{
-    let mut results = Vec::new();
-    for candidate in type_candidates(class_name) {
-        results.extend(resolve(fqn_short_name(candidate.trim_start_matches('\\'))));
     }
     dedup_locations(&mut results);
     results

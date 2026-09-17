@@ -607,6 +607,30 @@ Model::create($0);
     expect!["▶ create(string $name, int $age)  @param0"].assert_eq(&out);
 }
 
+/// An FQCN receiver must select its own docblock, even when this document
+/// declares another class with the same short name in a different namespace.
+#[tokio::test]
+async fn signature_help_doc_method_static_preserves_fqcn() {
+    let mut s = TestServer::new().await;
+    s.validate_syntax(false);
+    let out = s
+        .check_signature_help(
+            r#"<?php
+namespace Alpha {
+/** @method static void configure(string $decoy) */
+class Widget {}
+}
+namespace Zeta {
+/** @method static void configure(int $target) */
+class Widget {}
+}
+\Zeta\Widget::configure($0);
+"#,
+        )
+        .await;
+    expect!["▶ configure(int $target)  @param0"].assert_eq(&out);
+}
+
 /// An optional parameter in a `@method` tag is shown with `= ...` placeholder.
 #[tokio::test]
 async fn signature_help_doc_method_optional_param() {

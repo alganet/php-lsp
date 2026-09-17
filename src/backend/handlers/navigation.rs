@@ -28,6 +28,10 @@ impl Backend {
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         guard_async_result("goto_definition", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position_params.text_document.uri;
             let position = params.text_document_position_params.position;
             let source = self.get_open_text(uri).unwrap_or_default();
@@ -120,17 +124,13 @@ impl Backend {
                     let word_task = word.clone();
                     let found = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             let loc = find_method_in_class_hierarchy(
                                 class_fqn_task.as_ref(),
                                 &word_task,
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )?;
@@ -182,17 +182,13 @@ impl Backend {
                     let wi_task = Arc::clone(&wi);
                     let loc = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             find_property_in_class_hierarchy(
                                 class_fqn_arc.as_ref(),
                                 property_name_arc.as_ref(),
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )
@@ -249,17 +245,13 @@ impl Backend {
                     let word_task = word.clone();
                     let found = self
                         .blocking_gated(super::super::debug_gate::GATE_GOTO_DEFINITION, move || {
-                            let class_candidates =
-                                |short: &str| docs.class_candidates_by_short_name(&wi_task, short);
                             let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
-                            let resolve_class_ref = |fqn: &str| {
-                                docs.resolve_class_ref_by_fqn_or_short_name_fallback(&wi_task, fqn)
-                            };
+                            let resolve_class_ref =
+                                |fqn: &str| docs.resolve_class_ref_by_fqn(&wi_task, fqn);
                             let loc = find_method_in_class_hierarchy(
                                 &first_cls_task,
                                 &word_task,
                                 &wi_task,
-                                &class_candidates,
                                 &get_doc,
                                 &resolve_class_ref,
                             )?;
@@ -285,7 +277,7 @@ impl Backend {
                     // walk the PSR-4 vendor hierarchy starting from there.
                     let class_fqn = self
                         .docs
-                        .resolve_class_ref_by_fqn_or_short_name_fallback(&wi2, &first_cls)
+                        .resolve_class_ref_by_fqn(&wi2, &first_cls)
                         .and_then(|cr| {
                             wi2.at(cr)
                                 .map(|(_, cls)| cls.fqn.trim_start_matches('\\').to_owned())
@@ -369,6 +361,10 @@ impl Backend {
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
         guard_async_result("references", async move {
+            // Held for the request's lifetime so a concurrent background
+            // warm/reanalysis sweep yields at its next chunk boundary
+            // instead of racing this interactive read for CPU/rayon workers.
+            let _interactive = self.docs.interactive_read_guard();
             let uri = &params.text_document_position.text_document.uri;
             let position = params.text_document_position.position;
             let source = self.get_open_text(uri).unwrap_or_default();
@@ -999,11 +995,10 @@ impl Backend {
         .unwrap_or_default()
     }
 
-    /// Mir's own per-file resolution of the symbol under the cursor
-    /// (receiver types, aliases, namespaces) — its `ReferenceKind` maps 1:1
-    /// onto the index key. `None` either because the cursor is on a
-    /// declaration (mir only resolves usages) or because mir hasn't yet
-    /// analyzed a companion file this reference depends on.
+    /// Mir's targeted per-file resolution of the symbol identity under the
+    /// cursor (receiver types, aliases, namespaces). `None` means either no
+    /// codebase symbol exists there or mir has not yet analyzed a companion
+    /// file this reference depends on.
     async fn resolve_usage_symbol(
         &self,
         uri: &Uri,
@@ -1011,13 +1006,14 @@ impl Backend {
         source: &str,
         position: Position,
     ) -> Option<mir_analyzer::Name> {
-        let analysis = self.cached_analysis_async(uri).await;
-        analysis.as_deref().and_then(|a| {
-            let doc = doc_opt?;
-            let off = crate::text::word_range_at(source, position)
-                .map(|r| doc.view().byte_of_position(r.start))?;
-            a.symbol_at(off).and_then(|s| s.kind.to_name())
-        })
+        let doc = doc_opt?;
+        let offset = crate::text::word_range_at(source, position)
+            .map(|range| doc.view().byte_of_position(range.start))?;
+        let docs = Arc::clone(&self.docs);
+        let uri = uri.clone();
+        tokio::task::spawn_blocking(move || docs.mir_name_at(&uri, offset))
+            .await
+            .unwrap_or_default()
     }
 
     /// [`Self::resolve_usage_symbol`], but when the first attempt comes back
@@ -1143,63 +1139,36 @@ impl Backend {
             },
         };
         let mut exact = Vec::new();
-        let mut by_name = Vec::new();
         match symbol {
             mir_analyzer::Name::Class(fqn) => {
                 let target = fqn.trim_start_matches('\\');
-                for r in &self.docs.class_candidates_by_short_name(&ws, short) {
-                    let Some((uri, cls)) = ws.at(*r) else {
-                        continue;
-                    };
-                    if cls.name.as_ref() != short {
-                        continue;
-                    }
-                    let loc = Location {
+                if let Some((uri, cls)) = self
+                    .docs
+                    .class_ref_by_fqn(&ws, target)
+                    .and_then(|r| ws.at(r))
+                {
+                    exact.push(Location {
                         uri: uri.clone(),
                         range: name_range(cls.start_line, cls.name_char),
-                    };
-                    if cls.fqn.trim_start_matches('\\') == target {
-                        exact.push(loc);
-                    } else {
-                        by_name.push(loc);
-                    }
+                    });
                 }
             }
             mir_analyzer::Name::Function(fqn) => {
                 let target = fqn.trim_start_matches('\\');
-                for (uri, idx) in &ws.files {
-                    for f in &idx.functions {
-                        if f.name.as_ref() != short {
-                            continue;
-                        }
-                        let loc = Location {
-                            uri: uri.clone(),
-                            range: name_range(f.start_line, f.name_char),
-                        };
-                        if f.fqn.trim_start_matches('\\') == target {
-                            exact.push(loc);
-                        } else {
-                            by_name.push(loc);
-                        }
-                    }
+                if let Some((uri, function)) = self
+                    .docs
+                    .function_ref_by_fqn(&ws, target)
+                    .and_then(|r| ws.function_at(r))
+                {
+                    exact.push(Location {
+                        uri: uri.clone(),
+                        range: name_range(function.start_line, function.name_char),
+                    });
                 }
             }
             _ => {}
         }
-        if !exact.is_empty() {
-            exact
-        } else if word.contains('\\') {
-            // A qualified cursor word already names its own namespace, so a
-            // same-short-name declaration elsewhere that its FQN doesn't
-            // match is a different symbol, not a stale-index near-miss —
-            // e.g. `use App\Logger;` referring to nothing real must not
-            // spuriously match an unrelated global `class Logger {}`.
-            // Bare-word cursors carry no such namespace claim, so their
-            // by-name fallback stands.
-            Vec::new()
-        } else {
-            by_name
-        }
+        exact
     }
 
     pub(crate) async fn handle_linked_editing_range(

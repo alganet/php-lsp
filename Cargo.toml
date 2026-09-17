@@ -1,6 +1,6 @@
 [package]
 name = "php-lsp"
-version = "0.25.1"
+version = "0.25.4"
 edition = "2024"
 description = "A PHP Language Server Protocol implementation"
 license = "MIT"
@@ -50,10 +50,10 @@ dhat = { version = "0.3", optional = true }
 mimalloc = { version = "0.1", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-mir-analyzer = { version = "0.72", git = "https://github.com/jorgsowa/mir" }
-mir-issues = { version = "0.72", git = "https://github.com/jorgsowa/mir" }
-mir-codebase = { version = "0.72", git = "https://github.com/jorgsowa/mir" }
-mir-types = { version = "0.72", git = "https://github.com/jorgsowa/mir" }
+mir-analyzer = { version = "0.75.0", git = "https://github.com/jorgsowa/mir" }
+mir-issues = { version = "0.75.0", git = "https://github.com/jorgsowa/mir" }
+mir-codebase = { version = "0.75.0", git = "https://github.com/jorgsowa/mir" }
+mir-types = { version = "0.75.0", git = "https://github.com/jorgsowa/mir" }
 php-rs-parser = "0.19"
 php-ast = "0.19"
 php-lexer = "0.19"
@@ -67,7 +67,7 @@ bincode = { version = "2", features = ["serde"] }
 blake3 = "1"
 dashmap = "6"
 rayon = "1"
-salsa = "=0.28.1"
+salsa = "=0.28.2"
 arc-swap = "1"
 percent-encoding = "2"
 
@@ -83,7 +83,7 @@ expect-test = "1"
 indexmap = "2"
 criterion = { version = "0.8", features = ["html_reports"] }
 iai-callgrind = "0.16"
-serial_test = "3"
+serial_test = "4"
 
 [[bench]]
 name = "iai_critical"

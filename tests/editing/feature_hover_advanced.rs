@@ -614,6 +614,69 @@ $m->send(subje$0ct: 'Hello', to: 'a@b.com');
     .await;
 }
 
+/// A receiver type supplied by MIR is an FQCN. Named-argument hover must keep
+/// that identity when selecting a method declaration, rather than taking the
+/// first `Widget` from another namespace.
+#[tokio::test]
+async fn hover_named_arg_method_preserves_receiver_namespace() {
+    let mut s = TestServer::new().await;
+    s.validate_syntax(false);
+    s.check_hover_annotated(
+        r#"//- /AlphaWidget.php
+<?php
+namespace Alpha {
+    class Widget { public function configure(int $decoy): void {} }
+}
+
+//- /ZetaWidget.php
+<?php
+namespace Zeta {
+    class Widget { public function configure(string $target): void {} }
+}
+
+//- /Main.php
+<?php
+function run(\Zeta\Widget $widget): void {
+    $widget->configure(tar$0get: 'ok');
+}
+"#,
+        expect![[r#"
+            ```php
+            (parameter) string $target
+            ```"#]],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hover_named_arg_static_method_preserves_fqcn() {
+    let mut s = TestServer::new().await;
+    s.validate_syntax(false);
+    s.check_hover_annotated(
+        r#"//- /AlphaWidget.php
+<?php
+namespace Alpha {
+    class Widget { public static function configure(int $decoy): void {} }
+}
+
+//- /ZetaWidget.php
+<?php
+namespace Zeta {
+    class Widget { public static function configure(string $target): void {} }
+}
+
+//- /Main.php
+<?php
+\Zeta\Widget::configure(tar$0get: 'ok');
+"#,
+        expect![[r#"
+            ```php
+            (parameter) string $target
+            ```"#]],
+    )
+    .await;
+}
+
 /// A wrapped call (common after formatter line-wrapping for long argument
 /// lists) puts the callee on an earlier line than the label being hovered —
 /// the backward scan for the enclosing `(` must cross that line boundary.

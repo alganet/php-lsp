@@ -298,29 +298,33 @@ class UserRepository$0 extends Repository {}
     expect!["Repository (Class) @ src/Repository.php:1"].assert_eq(&out);
 }
 
-/// Supertypes resolves via short-name lookup.  Two classes with the same short
-/// name but different namespaces both appear as candidates; the test documents
-/// that supertypes returns *a* match rather than asserting a specific FQN.
+/// Supertypes resolves the canonical FQN, not an arbitrary workspace class
+/// with the same short name.
 #[tokio::test]
-async fn supertypes_same_short_name_finds_one_match() {
+async fn supertypes_same_short_name_resolves_imported_fqn() {
     let mut s = TestServer::new().await;
     s.validate_syntax(false);
     let out = s
         .check_supertypes(
             r#"//- /A/Base.php
-<?php class BaseA {}
+<?php
+namespace A;
+class Base {}
 
 //- /B/Base.php
-<?php class BaseB {}
+<?php
+namespace B;
+class Base {}
 
 //- /App/Child.php
 <?php
-class Child$0 extends BaseA {}
+namespace App;
+use A\Base;
+class Child$0 extends Base {}
 "#,
         )
         .await;
-    // Unique parent name: must resolve to exactly the right class.
-    expect!["BaseA (Class) @ A/Base.php:0"].assert_eq(&out);
+    expect!["Base (Class) @ A/Base.php:2"].assert_eq(&out);
 }
 
 // ── mir-backed subtypes: aliased extends ─────────────────────────────────────

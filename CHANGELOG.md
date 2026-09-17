@@ -8,6 +8,32 @@ All notable changes to php-lsp are documented here.
 
 - **Stale diagnostics survive the initial workspace scan**: a file opened while indexing was still running was analyzed against a partial index, and the analysis cache — keyed on `(source, decl_version)` — was never invalidated when the scan finished, so the post-index republish re-served the same memo. Symbols declared in files the scan had not yet reached stayed reported as undefined until the file was edited. `mark_index_ready` now bumps `decl_version`, the same invalidation `note_new_file_declarations` performs on the `didChangeWatchedFiles` path.
 
+## [0.25.4] — 2026-09-11
+
+### Dependencies
+
+- **mir updated to 0.73.0**.
+
+## [0.25.3] — 2026-09-11
+
+### Added
+
+- **Reference index warms on folder-add and PHP-version change**: adding a workspace folder or switching the PHP version now runs the same reference-warm pass boot does, instead of leaving those paths cold until the first query.
+
+### Fixed
+
+- **Interactive requests no longer compete uncontested with background warming**: hover, references, completion, and go-to-definition now mark themselves as interactive reads so a concurrent background warm/reanalysis sweep yields at its next chunk boundary instead of racing them for CPU.
+
+### Maintenance
+
+- **Re-cut the release**: the v0.25.2 release workflow installed cross-compilation targets for Rust 1.97.1 while the repository's toolchain override selected Rust 1.98.0, leaving three platform builds without their standard libraries. The release workflow now installs Rust 1.98.0 consistently.
+
+## [0.25.2] — 2026-09-11
+
+### Dependencies
+
+- **mir updated to 0.72.1**: adopts its diagnostics-only path for raw analyzer runs and targeted symbol-name lookup for references, plus the 0.72.1 analyzer correctness and incremental-performance fixes. Salsa is updated in lockstep from 0.28.1 to 0.28.2.
+
 ## [0.25.1] — 2026-08-22
 
 ### Fixed

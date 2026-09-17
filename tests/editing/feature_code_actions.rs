@@ -4,6 +4,43 @@
 use super::*;
 
 use expect_test::expect;
+use serde_json::Value;
+
+fn deferred_action(resp: &Value, title: &str, kind: &str, resolve_tag: &str) -> Value {
+    assert!(
+        resp["error"].is_null(),
+        "code action request failed: {resp:#}"
+    );
+    let actions = resp["result"]
+        .as_array()
+        .expect("code action response must contain an action array");
+    let action = actions
+        .iter()
+        .find(|action| action["title"].as_str() == Some(title))
+        .unwrap_or_else(|| panic!("missing {title:?} action in response: {resp:#}"));
+
+    assert_eq!(action["kind"].as_str(), Some(kind));
+    assert!(action["edit"].is_null(), "{title:?} must defer its edit");
+    assert_eq!(
+        action["data"]["php_lsp_resolve"].as_str(),
+        Some(resolve_tag),
+        "{title:?} must carry its resolver tag"
+    );
+    action.clone()
+}
+
+fn resolved_workspace_edit(resp: &Value) -> &Value {
+    assert!(
+        resp["error"].is_null(),
+        "code action resolve failed: {resp:#}"
+    );
+    let edit = &resp["result"]["edit"];
+    assert!(
+        edit.is_object(),
+        "resolved action must contain an edit: {resp:#}"
+    );
+    edit
+}
 
 #[tokio::test]
 async fn code_actions_offers_generate_constructor() {
@@ -73,9 +110,7 @@ class $0My$0 implements Writable {}
     expect!["quickfix         Implement missing method"].assert_eq(&out);
 }
 
-// --- codeAction/resolve roundtrip tests ---
-// Each test verifies that a deferred action (no `edit` on initial request)
-// gets its full WorkspaceEdit populated after calling codeAction/resolve.
+// Deferred actions must return their edits through `codeAction/resolve`.
 
 #[tokio::test]
 async fn code_action_resolve_return_type() {
@@ -85,23 +120,15 @@ async fn code_action_resolve_return_type() {
         .await;
 
     let resp = server.code_action("rt.php", 1, 0, 1, 30).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["title"].as_str() == Some("Add return type `: mixed`"))
-        .cloned()
-        .expect("return type action");
-
-    assert!(
-        action["edit"].is_null(),
-        "action must be deferred (no edit)"
+    let action = deferred_action(
+        &resp,
+        "Add return type `: mixed`",
+        "refactor",
+        "return_type",
     );
-    assert!(!action["data"].is_null(), "action must carry resolve data");
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null(), "resolve must not error");
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // rt.php
         1:19-1:19 → ": mixed""#]]
@@ -116,20 +143,10 @@ async fn code_action_resolve_phpdoc() {
         .await;
 
     let resp = server.code_action("doc.php", 1, 0, 1, 40).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["title"].as_str() == Some("Generate PHPDoc"))
-        .cloned()
-        .expect("phpdoc action");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
-    assert!(!action["data"].is_null(), "action must carry resolve data");
+    let action = deferred_action(&resp, "Generate PHPDoc", "refactor", "phpdoc");
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // doc.php
         1:0-1:0 → "/**\n * @param string $name\n * @return void\n */\n""#]]
@@ -147,19 +164,10 @@ async fn code_action_resolve_constructor() {
         .await;
 
     let resp = server.code_action("ctor.php", 1, 0, 1, 11).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["title"].as_str() == Some("Generate constructor"))
-        .cloned()
-        .expect("constructor action");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(&resp, "Generate constructor", "refactor", "constructor");
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // ctor.php
         4:0-4:0 → "    public function __construct(\n        float $x,\n        float $y,\n    ) {\n        $this->x = $x;\n        $this->y = $y;\n    }\n\n""#]].assert_eq(&out);
@@ -176,24 +184,15 @@ async fn code_action_resolve_getters_setters() {
         .await;
 
     let resp = server.code_action("gs.php", 1, 0, 1, 9).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.contains("getters/setters"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("getters/setters action");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(
+        &resp,
+        "Generate 2 getters/setters",
+        "refactor",
+        "getters_setters",
+    );
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // gs.php
         4:0-4:0 → "    public function getWidth(): int\n    {\n        return $this->width;\n    }\n\n    public function setWidth(int $width): void\n    {\n        $this->width = $width;\n    }\n\n    public function getHeight(): int\n    {\n        return $this->height;\n    }\n\n    public function setHeight(int $height): void\n    {\n        $this->height = $height;\n    }\n\n""#]].assert_eq(&out);
@@ -210,19 +209,11 @@ async fn code_action_resolve_implement_missing_methods() {
         .await;
 
     let resp = server.code_action("impl.php", 2, 0, 2, 30).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["title"].as_str() == Some("Implement missing method"))
-        .cloned()
-        .expect("implement missing method action");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(&resp, "Implement missing method", "quickfix", "implement");
+    assert_eq!(action["isPreferred"].as_bool(), Some(true));
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // impl.php
         2:31-2:31 → "\n    public function log(): void\n    {\n        throw new \\RuntimeException('Not implemented');\n    }\n\n""#]].assert_eq(&out);
@@ -239,24 +230,15 @@ async fn code_action_resolve_promote_constructor_params() {
         .await;
 
     let resp = server.code_action("promote.php", 2, 0, 7, 6).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.to_lowercase().contains("promot"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("promote action must be offered for non-promoted constructor params");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(
+        &resp,
+        "Promote 2 constructor parameters",
+        "refactor",
+        "promote",
+    );
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // promote.php
         2:0-3:0 → ""
@@ -279,30 +261,15 @@ async fn code_action_resolve_promote_simple_private_property() {
         .await;
 
     let resp = server.code_action("promote.php", 2, 0, 5, 6).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.to_lowercase().contains("promot"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("promote action should be offered for promotable properties");
-
-    let title = action["title"].as_str().expect("action must have title");
-    assert_eq!(
-        title, "Promote constructor parameter",
-        "single property should use singular form"
+    let action = deferred_action(
+        &resp,
+        "Promote constructor parameter",
+        "refactor",
+        "promote",
     );
 
-    assert!(action["edit"].is_null(), "action must be deferred");
-
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // promote.php
         2:0-3:0 → ""
@@ -322,30 +289,15 @@ async fn code_action_resolve_promote_readonly_property() {
         .await;
 
     let resp = server.code_action("promote.php", 2, 0, 5, 6).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.to_lowercase().contains("promot"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("promote action should be offered for readonly properties");
-
-    let title = action["title"].as_str().expect("action must have title");
-    assert_eq!(
-        title, "Promote constructor parameter",
-        "readonly property should also use singular form"
+    let action = deferred_action(
+        &resp,
+        "Promote constructor parameter",
+        "refactor",
+        "promote",
     );
 
-    assert!(action["edit"].is_null(), "action must be deferred");
-
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // promote.php
         2:0-3:0 → ""
@@ -365,30 +317,15 @@ async fn code_action_resolve_promote_multiple_properties() {
         .await;
 
     let resp = server.code_action("promote.php", 2, 0, 7, 6).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.to_lowercase().contains("promot"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("promote action should be offered for multiple properties");
-
-    let title = action["title"].as_str().expect("action must have title");
-    assert_eq!(
-        title, "Promote 2 constructor parameters",
-        "multiple properties should use plural form with count"
+    let action = deferred_action(
+        &resp,
+        "Promote 2 constructor parameters",
+        "refactor",
+        "promote",
     );
 
-    assert!(action["edit"].is_null(), "action must be deferred");
-
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // promote.php
         2:0-3:0 → ""
@@ -416,13 +353,18 @@ async fn code_action_resolve_without_data_is_passthrough() {
         Some("My Action"),
         "title must roundtrip"
     );
+    assert_eq!(resolved["result"]["kind"].as_str(), Some("refactor"));
+    assert!(
+        resolved["result"]["data"].is_null(),
+        "data must remain absent"
+    );
     assert!(
         resolved["result"]["edit"].is_null(),
         "no edit should be added for data-less actions"
     );
 }
 
-// ── Negative tests for promote_action: verify action is NOT offered ────
+// Promotion must be unavailable when no safe property-to-parameter mapping exists.
 
 #[tokio::test]
 async fn promote_action_not_offered_without_constructor() {
@@ -513,7 +455,6 @@ class Foo {
     expect!["refactor         Generate getter/setter"].assert_eq(&out);
 }
 
-/// Properties immediately before constructor (no blank line) should still be promotable.
 #[tokio::test]
 async fn promote_action_with_no_blank_line_before_constructor() {
     let mut server = TestServer::new().await;
@@ -535,7 +476,6 @@ class Foo {
     .assert_eq(&out);
 }
 
-/// Promote action with multiple properties works when using range selection.
 #[tokio::test]
 async fn promote_action_on_multiple_properties() {
     let mut server = TestServer::new().await;
@@ -560,7 +500,6 @@ $0class User {
     .assert_eq(&out);
 }
 
-/// Constructor parameters with default values should be promotable.
 #[tokio::test]
 async fn promote_action_with_constructor_default_value() {
     let mut server = TestServer::new().await;
@@ -584,10 +523,6 @@ class Config {
     .assert_eq(&out);
 }
 
-/// A property's own default value (`= 3`) must carry over onto the promoted
-/// parameter, not be silently dropped — the property declaration line is
-/// deleted entirely, so its default only survives if explicitly copied onto
-/// the parameter.
 #[tokio::test]
 async fn promote_action_carries_over_property_default_value() {
     let mut server = TestServer::new().await;
@@ -614,9 +549,6 @@ class Config {
     .assert_eq(&out);
 }
 
-/// When the constructor parameter already declares its own default, that
-/// default wins — the property's default (if different) is not appended,
-/// matching the existing type-hint precedence (param's own annotation wins).
 #[tokio::test]
 async fn promote_action_param_own_default_wins_over_property_default() {
     let mut server = TestServer::new().await;
@@ -643,13 +575,11 @@ class Config {
     .assert_eq(&out);
 }
 
-/// Properties without trailing newline before constructor should work.
-/// Regression: whole_line_range logic handles files without trailing newlines.
 #[tokio::test]
 async fn promote_action_resolve_no_trailing_newline() {
     let mut server = TestServer::new().await;
     let out = server
-        .check_code_actions(
+        .check_code_action_apply(
             r#"<?php
 class Foo {
     public string $name$0;
@@ -657,15 +587,18 @@ class Foo {
         $this->name = $name;
     }
 }"#,
+            "Promote constructor parameter",
         )
         .await;
     expect![[r#"
-        refactor         Generate getter/setter
-        refactor         Promote constructor parameter"#]]
+        <?php
+        class Foo {
+            public function __construct(public string $name) {
+            }
+        }"#]]
     .assert_eq(&out);
 }
 
-/// Readonly properties with complex types (nullable, mixed, etc.) should be promotable.
 #[tokio::test]
 async fn promote_action_readonly_with_nullable_type() {
     let mut server = TestServer::new().await;
@@ -689,13 +622,8 @@ class Config {
     .assert_eq(&out);
 }
 
-// --- Documented Limitations ---
-
-/// **LIMITATION**: Unbraced namespace context is not tracked by promote_action.
-/// In unbraced namespace declarations (namespace Foo;), classes defined at the
-/// top level still work. However, this test documents the behavior.
 #[tokio::test]
-async fn promote_action_limitation_unbraced_namespace_context() {
+async fn promote_action_supports_unbraced_namespace() {
     let mut server = TestServer::new().await;
     let out = server
         .check_code_actions(
@@ -718,11 +646,8 @@ $0class Foo {
     .assert_eq(&out);
 }
 
-/// **LIMITATION**: Static properties are explicitly not promoted because
-/// they cannot be promoted to constructor parameters (constructor parameters
-/// can only handle instance properties).
 #[tokio::test]
-async fn promote_action_limitation_static_properties_not_promotable() {
+async fn promote_action_not_offered_for_static_assignment() {
     let mut server = TestServer::new().await;
     let out = server
         .check_code_actions(
@@ -739,11 +664,8 @@ class Config {
     expect!["<no actions>"].assert_eq(&out);
 }
 
-/// **LIMITATION**: Complex assignments are not promotable.
-/// Only simple assignments like `$this->prop = $param;` are supported.
-/// Other patterns like conditional assignment, function call assignment, etc. are skipped.
 #[tokio::test]
-async fn promote_action_limitation_complex_assignments() {
+async fn promote_action_not_offered_for_conditional_assignment() {
     let mut server = TestServer::new().await;
     let out = server
         .check_code_actions(
@@ -762,11 +684,8 @@ class Foo {
     expect!["refactor         Generate getter/setter"].assert_eq(&out);
 }
 
-/// **LIMITATION**: Assignment to wrong variable name prevents promotion.
-/// If parameter is `$name` but assignment is `$this->name = $different;`,
-/// the property won't be promoted because names don't match.
 #[tokio::test]
-async fn promote_action_limitation_mismatched_parameter_name() {
+async fn promote_action_not_offered_for_mismatched_parameter() {
     let mut server = TestServer::new().await;
     let out = server
         .check_code_actions(
@@ -783,10 +702,8 @@ class User {
     expect!["refactor         Generate getter/setter"].assert_eq(&out);
 }
 
-/// **LIMITATION**: Multiple assignment targets are not promoted.
-/// Promotion requires a simple one-to-one mapping between property and parameter.
 #[tokio::test]
-async fn promote_action_limitation_multiple_assignments() {
+async fn promote_action_supports_multiple_properties() {
     let mut server = TestServer::new().await;
     let out = server
         .check_code_actions(
@@ -808,9 +725,6 @@ class Logger {
     .assert_eq(&out);
 }
 
-// ── property type hint propagation ───────────────────────────────────────────
-
-/// Promoting a typed property preserves the type hint on the generated parameter.
 #[tokio::test]
 async fn promote_action_with_property_type_hint() {
     let mut server = TestServer::new().await;
@@ -832,7 +746,6 @@ class User {
     .assert_eq(&out);
 }
 
-/// Edge case: property with nullable type hint should promote.
 #[tokio::test]
 async fn promote_action_with_nullable_type_hint() {
     let mut server = TestServer::new().await;
@@ -854,7 +767,6 @@ class Config {
     .assert_eq(&out);
 }
 
-/// Edge case: property with union type hint should promote.
 #[tokio::test]
 async fn promote_action_with_union_type_hint() {
     let mut server = TestServer::new().await;
@@ -876,7 +788,6 @@ class Parser {
     .assert_eq(&out);
 }
 
-/// Edge case: readonly property should promote.
 #[tokio::test]
 async fn promote_action_with_readonly_property() {
     let mut server = TestServer::new().await;
@@ -898,7 +809,6 @@ class Config {
     .assert_eq(&out);
 }
 
-/// Edge case: property with mixed type should promote.
 #[tokio::test]
 async fn promote_action_with_mixed_type() {
     let mut server = TestServer::new().await;
@@ -920,9 +830,6 @@ class Flexible {
     .assert_eq(&out);
 }
 
-/// Implement missing methods when the interface is defined in a separate file
-/// (background-indexed, not open). The action must resolve across the whole
-/// workspace, not just open files.
 #[tokio::test]
 async fn code_action_resolve_implement_cross_file_interface() {
     let mut server = TestServer::new().await;
@@ -940,37 +847,22 @@ async fn code_action_resolve_implement_cross_file_interface() {
         .await;
 
     let resp = server.code_action("Report.php", 1, 0, 1, 37).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Implement"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("implement missing methods action should be offered for cross-file interface");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(
+        &resp,
+        "Implement 2 missing methods",
+        "quickfix",
+        "implement",
+    );
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // Report.php
         1:35-1:35 → "\n    public function print(): void\n    {\n        throw new \\RuntimeException('Not implemented');\n    }\n\n    public function getLabel(): string\n    {\n        throw new \\RuntimeException('Not implemented');\n    }\n\n""#]]
     .assert_eq(&out);
 }
 
-/// `codeAction/resolve`'s "implement" tag re-scans every tracked workspace
-/// file's cached text (an Aho-Corasick search over `docs_for_scan_mentioning`)
-/// on the async task unless it's deferred to `spawn_blocking`, unlike its
-/// sibling `textDocument/codeAction`, which already defers the same work.
-/// A large workspace makes that scan non-trivial, so this pins the handler
-/// staying off the request loop the same way the single-document handlers'
-/// responsiveness tests do (see `feature_server.rs`).
+// Resolving an implementation action must not block the request loop.
 #[tokio::test]
 async fn code_action_resolve_implement_stays_responsive_on_large_workspace() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -979,9 +871,6 @@ async fn code_action_resolve_implement_stays_responsive_on_large_workspace() {
         "<?php\ninterface Printable { public function print(): void; }\n",
     )
     .unwrap();
-    // The Aho-Corasick pass scans every tracked file's cached text
-    // regardless of whether it matches, so plenty of sizeable unrelated
-    // files make the scan itself measurably slow.
     for i in 0..300 {
         std::fs::write(
             workspace.path().join(format!("Noise{i}.php")),
@@ -1022,8 +911,6 @@ async fn code_action_resolve_implement_stays_responsive_on_large_workspace() {
         .await;
 }
 
-/// Implement missing methods when the interface is in a namespaced file and
-/// the class uses a `use` import. Namespace resolution must be FQN-aware.
 #[tokio::test]
 async fn code_action_resolve_implement_namespaced_cross_file_interface() {
     let mut server = TestServer::new().await;
@@ -1041,24 +928,10 @@ async fn code_action_resolve_implement_namespaced_cross_file_interface() {
         .await;
 
     let resp = server.code_action("Models/User.php", 3, 0, 3, 34).await;
-    let action = resp["result"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Implement"))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .expect("implement missing methods should work with namespaced cross-file interface");
-
-    assert!(action["edit"].is_null(), "action must be deferred");
+    let action = deferred_action(&resp, "Implement missing method", "quickfix", "implement");
 
     let resolved = server.code_action_resolve(action).await;
-    assert!(resolved["error"].is_null());
-    let out = canonicalize_workspace_edit(&resolved["result"]["edit"], &server.uri(""));
+    let out = canonicalize_workspace_edit(resolved_workspace_edit(&resolved), &server.uri(""));
     expect![[r#"
         // Models/User.php
         3:36-3:36 → "\n    public function serialize(): string\n    {\n        throw new \\RuntimeException('Not implemented');\n    }\n\n""#]]
@@ -1082,23 +955,26 @@ async fn code_action_quickfix_undefined_function_cross_file() {
         .await;
 
     let resp = server.code_action("main.php", 2, 0, 2, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
+    assert!(
+        resp["error"].is_null(),
+        "code action request failed: {resp:#}"
+    );
+    let actions = resp["result"]
+        .as_array()
+        .expect("code action response must contain an action array");
     let action = actions
         .iter()
         .find(|a| {
             a["title"]
                 .as_str()
-                .map(|t| t.starts_with("Add use function"))
+                .map(|t| t.starts_with("Add use function App\\Helpers\\tap"))
                 .unwrap_or(false)
         })
-        .cloned();
+        .expect("expected an Add use function quick-fix");
 
-    assert!(
-        action.is_some(),
-        "expected 'Add use function' quick-fix, got: {resp:#}"
-    );
-    let a = action.unwrap();
-    let out = canonicalize_workspace_edit(&a["edit"], &server.uri(""));
+    assert_eq!(action["kind"].as_str(), Some("quickfix"));
+    assert!(action["edit"].is_object(), "quick-fix must include an edit");
+    let out = canonicalize_workspace_edit(&action["edit"], &server.uri(""));
     expect![[r#"
         // main.php
         2:0-2:0 → "use function App\\Helpers\\tap;\n""#]]
@@ -1107,11 +983,8 @@ async fn code_action_quickfix_undefined_function_cross_file() {
 
 // --- Quick-fix: UndefinedClass → use FQN; ---
 
-/// REGRESSION: the "Add use" quick-fix must find classes anywhere in the
-/// workspace index, not just among currently-open editor buffers. Widget.php
-/// is written to disk and indexed via the workspace scan but never opened —
-/// this reproduces the common case of importing a class whose file isn't
-/// already open in the editor.
+/// A unique workspace class should be offered as an import even when its file
+/// is indexed but not open in the editor.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_not_open_in_editor() {
     let mut server = TestServer::with_fixture("psr4-mini").await;
@@ -1132,34 +1005,25 @@ async fn code_action_quickfix_undefined_class_not_open_in_editor() {
         .await;
 
     let resp = server.code_action("src/main.php", 2, 4, 2, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let action = actions
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Add use"))
-                .unwrap_or(false)
-        })
-        .cloned();
-
-    assert!(
-        action.is_some(),
-        "expected 'Add use' quick-fix for a class indexed but not open in the editor, got: {resp:#}"
-    );
-    let a = action.unwrap();
-    let out = canonicalize_workspace_edit(&a["edit"], &server.uri(""));
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+    let action = resp["result"].as_array().and_then(|actions| {
+        actions
+            .iter()
+            .find(|a| a["title"] == "Add use App\\Service\\Widget")
+    });
+    let action = action.expect("expected an Add use quick-fix");
+    let out = canonicalize_workspace_edit(&action["edit"], &server.uri(""));
     expect![[r#"
         // src/main.php
         2:0-2:0 → "use App\\Service\\Widget;\n""#]]
     .assert_eq(&out);
 }
 
-/// REGRESSION: mir reports `UndefinedClass` with the namespace-resolved
-/// attempt (e.g. `App\Widget` for a bare `Widget` reference inside
-/// `namespace App;`), not the bare token the developer wrote. The quick-fix
-/// must strip that prefix before looking the short name up in the workspace
-/// index, or it silently never fires for any namespaced consumer file.
+/// The namespace-resolved diagnostic FQN is reduced to its short name only
+/// after exact resolution has failed, so a unique imported class is offered.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_in_namespaced_file() {
     let mut server = TestServer::new().await;
@@ -1174,40 +1038,44 @@ async fn code_action_quickfix_undefined_class_in_namespaced_file() {
         .await;
 
     let resp = server.code_action("main.php", 2, 4, 2, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let action = actions
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Add use"))
-                .unwrap_or(false)
-        })
-        .cloned();
-
-    assert!(
-        action.is_some(),
-        "expected 'Add use' quick-fix in a namespaced consumer file, got: {resp:#}"
-    );
-    let a = action.unwrap();
-    let out = canonicalize_workspace_edit(&a["edit"], &server.uri(""));
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+    let action = resp["result"].as_array().and_then(|actions| {
+        actions
+            .iter()
+            .find(|a| a["title"] == "Add use App\\Service\\Widget")
+    });
+    let action = action.expect("expected an Add use quick-fix");
+    let out = canonicalize_workspace_edit(&action["edit"], &server.uri(""));
     expect![[r#"
         // main.php
         2:0-2:0 → "use App\\Service\\Widget;\n""#]]
     .assert_eq(&out);
 }
 
-// ============================================================================
-// `context.only` FILTERING
-// ============================================================================
-//
-// `organize_imports_action` doesn't depend on the request range, so a file
-// with an unsorted `use` block plus an undefined-class reference always
-// offers both a `quickfix` and a `source.organizeImports` action for the
-// same request — a solid fixture for asserting `context.only` filtering.
+/// Several classes with the same short name are ambiguous, so an import
+/// quick-fix must not guess between them.
+#[tokio::test]
+async fn code_action_quickfix_undefined_class_ambiguous_candidates_not_offered() {
+    let mut server = TestServer::new().await;
+    server
+        .open("A/Widget.php", "<?php\nnamespace A;\n\nclass Widget {}\n")
+        .await;
+    server
+        .open("B/Widget.php", "<?php\nnamespace B;\n\nclass Widget {}\n")
+        .await;
+    server
+        .open("main.php", "<?php\nnamespace App;\nnew Widget();\n")
+        .await;
 
-/// Sanity check that both actions actually show up unfiltered, so the
-/// filtering tests below are pinning real behavior, not an empty response.
+    let resp = server.code_action("main.php", 2, 4, 2, 10).await;
+    expect!["refactor.extract Extract variable [edit]"].assert_eq(&render_code_actions(&resp));
+}
+
+// `context.only` filtering
+
 #[tokio::test]
 async fn code_action_only_absent_returns_both_kinds() {
     let mut server = TestServer::new().await;
@@ -1225,19 +1093,11 @@ async fn code_action_only_absent_returns_both_kinds() {
         .await;
 
     let resp = server.code_action("main.php", 6, 4, 6, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        kinds.contains(&"quickfix"),
-        "expected an 'Add use' quickfix, got {kinds:?}"
-    );
-    assert!(
-        kinds.contains(&"source.organizeImports"),
-        "expected an organize-imports action, got {kinds:?}"
-    );
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]
+        source.organizeImports Organize imports [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
 }
 
 #[tokio::test]
@@ -1259,19 +1119,8 @@ async fn code_action_only_quickfix_excludes_organize_imports() {
     let resp = server
         .code_action_only("main.php", 6, 4, 6, 10, &["quickfix"])
         .await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        !kinds.is_empty(),
-        "expected the Add-use quickfix to survive filtering"
-    );
-    assert!(
-        kinds.iter().all(|k| *k == "quickfix"),
-        "only=[quickfix] should filter out non-quickfix actions, got {kinds:?}"
-    );
+    expect!["quickfix         Add use App\\Service\\Widget [edit]"]
+        .assert_eq(&render_code_actions(&resp));
 }
 
 #[tokio::test]
@@ -1293,23 +1142,69 @@ async fn code_action_only_organize_imports_excludes_quickfix() {
     let resp = server
         .code_action_only("main.php", 6, 4, 6, 10, &["source.organizeImports"])
         .await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        !kinds.is_empty(),
-        "expected the organize-imports action to survive filtering"
-    );
-    assert!(
-        kinds.iter().all(|k| *k == "source.organizeImports"),
-        "only=[source.organizeImports] should filter out the quickfix, got {kinds:?}"
-    );
+    expect!["source.organizeImports Organize imports [edit]"]
+        .assert_eq(&render_code_actions(&resp));
 }
 
-/// `only: ["refactor"]` must also match the more specific descendant kind
-/// `refactor.extract` — the LSP code-action-kind hierarchy is prefix-based.
+#[tokio::test]
+async fn code_action_only_source_includes_organize_imports_descendant() {
+    let mut server = TestServer::new().await;
+    server
+        .open(
+            "main.php",
+            "<?php\nnamespace App;\n\nuse App\\Zeta;\nuse App\\Alpha;\n\nnew Missing;\n",
+        )
+        .await;
+
+    let resp = server
+        .code_action_only("main.php", 6, 4, 6, 11, &["source"])
+        .await;
+    expect!["source.organizeImports Organize imports [edit]"]
+        .assert_eq(&render_code_actions(&resp));
+}
+
+#[tokio::test]
+async fn code_action_only_multiple_kinds_returns_their_actions() {
+    let mut server = TestServer::new().await;
+    server
+        .open(
+            "Service/Widget.php",
+            "<?php\nnamespace App\\Service;\n\nclass Widget {}\n",
+        )
+        .await;
+    server
+        .open(
+            "main.php",
+            "<?php\nnamespace App;\n\nuse App\\Zeta;\nuse App\\Alpha;\n\nnew Widget();\n",
+        )
+        .await;
+
+    let resp = server
+        .code_action_only("main.php", 6, 4, 6, 10, &["quickfix", "source"])
+        .await;
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        source.organizeImports Organize imports [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+}
+
+#[tokio::test]
+async fn code_action_only_returns_no_actions_when_no_kind_matches() {
+    let mut server = TestServer::new().await;
+    server.validate_syntax(false);
+    server
+        .open(
+            "main.php",
+            "<?php\nfunction f(): int {\n    return 1 + 2;\n}\n",
+        )
+        .await;
+
+    let resp = server
+        .code_action_only("main.php", 2, 11, 2, 16, &["quickfix"])
+        .await;
+    expect!["<no actions>"].assert_eq(&render_code_actions(&resp));
+}
+
 #[tokio::test]
 async fn code_action_only_refactor_includes_extract_descendant() {
     let mut server = TestServer::new().await;
@@ -1324,13 +1219,5 @@ async fn code_action_only_refactor_includes_extract_descendant() {
     let resp = server
         .code_action_only("main.php", 2, 11, 2, 16, &["refactor"])
         .await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        kinds.contains(&"refactor.extract"),
-        "only=[refactor] should include the refactor.extract descendant, got {kinds:?}"
-    );
+    expect!["refactor.extract Extract variable [edit]"].assert_eq(&render_code_actions(&resp));
 }

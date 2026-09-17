@@ -206,8 +206,8 @@ fn collect_local_type_decl_fqns(doc: &ParsedDoc) -> HashSet<String> {
 
 /// Build the typed `mir_analyzer::Name` for a declaration-site cursor from
 /// the classified `(word, kind)` plus resolved owner/target FQNs. Usage-site
-/// cursors don't come through here — `FileAnalysis::symbol_at` +
-/// `ReferenceKind::to_name` already carry the resolved symbol.
+/// cursors don't come through here — mir's targeted `AnalysisSession::name_at`
+/// path already carries the resolved symbol identity.
 ///
 /// `target_fqn` is the symbol's own FQN for Function/Class, the owning FQCN
 /// for Method/Property, and for Constant either the owning FQCN (class

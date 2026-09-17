@@ -174,9 +174,7 @@ impl LensEnv<'_> {
             if !seen.insert(current.clone()) {
                 return None;
             }
-            let chosen = self
-                .store
-                .resolve_class_ref_by_fqn_or_short_name_fallback(&ws, &current)?;
+            let chosen = self.store.resolve_class_ref_by_fqn(&ws, &current)?;
             let (uri, cls) = ws.at(chosen)?;
             let declaring_fqn = cls.fqn.trim_start_matches('\\').to_string();
             if let Some(m) = cls.methods.iter().find(|m| m.name.as_ref() == method) {

@@ -5,13 +5,12 @@ use php_ast::{Arg, ClassMemberKind, Expr, ExprKind, NamespaceBody, Param, Stmt, 
 use tower_lsp_server::ls_types::Position;
 
 use crate::document::ast::{ParsedDoc, format_type_hint};
-use crate::text::fqn_short_name;
 
 /// Resolve the class(es) of a named-argument call's receiver variable, for
 /// looking up the method's parameter signature. `receiver_offset` is a byte
 /// offset landing inside the receiver's variable token (see
 /// `find_named_arg_at`), used to look up mir's recorded type there. Returns
-/// short class names, `|`-joined for unions.
+/// fully-qualified class names, `|`-joined for unions.
 fn resolve_method_receiver_class(
     source: &str,
     doc: &ParsedDoc,
@@ -25,7 +24,7 @@ fn resolve_method_receiver_class(
     {
         let names: Vec<String> = crate::types::type_query::class_names(ty)
             .iter()
-            .map(|fqcn| fqn_short_name(fqcn).to_string())
+            .cloned()
             .collect();
         if !names.is_empty() {
             return Some(names.join("|"));
@@ -49,6 +48,7 @@ pub(crate) enum NamedArgCallee {
     },
     StaticMethod {
         class: String,
+        class_offset: u32,
         method: String,
     },
 }
@@ -109,10 +109,10 @@ pub(crate) fn find_named_arg_at(doc: &ParsedDoc, offset: u32) -> Option<(NamedAr
                         && let ExprKind::Identifier(class) = &s.class.kind
                         && let Some(method) = s.method.name_str()
                     {
-                        let short = fqn_short_name(class.trim_start_matches('\\')).to_string();
                         self.result = Some((
                             NamedArgCallee::StaticMethod {
-                                class: short,
+                                class: class.trim_start_matches('\\').to_string(),
+                                class_offset: s.class.span.start,
                                 method: method.to_string(),
                             },
                             label,
@@ -195,7 +195,22 @@ pub(crate) fn named_arg_hover_value(
             }
             None
         }
-        NamedArgCallee::StaticMethod { class, method } => {
+        NamedArgCallee::StaticMethod {
+            class,
+            class_offset,
+            method,
+        } => {
+            // MIR has already applied PHP namespace/import rules to a static
+            // call. Prefer that canonical identity over the raw AST spelling.
+            let resolved = analysis.and_then(|a| {
+                let sym = a.symbol_at(*class_offset)?;
+                match &sym.kind {
+                    mir_analyzer::ReferenceKind::StaticCall { class, .. } => {
+                        Some(class.to_string())
+                    }
+                    _ => None,
+                }
+            });
             let effective_class = if class == "self" || class == "static" {
                 crate::types::type_map::enclosing_class_at(source, doc, position)
                     .unwrap_or_else(|| class.clone())
@@ -204,7 +219,7 @@ pub(crate) fn named_arg_hover_value(
                     .and_then(|enc| find_parent_class_name(&doc.program().stmts, &enc))
                     .unwrap_or_else(|| class.clone())
             } else {
-                class.clone()
+                resolved.unwrap_or_else(|| class.clone())
             };
             for d in all_docs() {
                 if let Some((sig, db)) = find_param_sig_in_stmts(
@@ -228,6 +243,17 @@ fn find_param_sig_in_stmts(
     class_name: Option<&str>,
     label: &str,
 ) -> Option<(String, Option<crate::lang::docblock::Docblock>)> {
+    find_param_sig_in_namespace(source, stmts, callee_name, class_name, label, None)
+}
+
+fn find_param_sig_in_namespace(
+    source: &str,
+    stmts: &[Stmt<'_, '_>],
+    callee_name: &str,
+    class_name: Option<&str>,
+    label: &str,
+    namespace: Option<&str>,
+) -> Option<(String, Option<crate::lang::docblock::Docblock>)> {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Function(f) if class_name.is_none() && f.name == callee_name => {
@@ -238,10 +264,13 @@ fn find_param_sig_in_stmts(
                 return Some((sig, db));
             }
             StmtKind::Class(c)
-                if class_name
-                    .as_ref()
-                    .map(|cn| cn == &c.name.as_ref().map(|n| n.to_string()).unwrap_or_default())
-                    .unwrap_or(false) =>
+                if class_name.is_some_and(|cn| {
+                    class_matches_declaration(
+                        cn,
+                        &c.name.as_ref().map(|n| n.to_string()).unwrap_or_default(),
+                        namespace,
+                    )
+                }) =>
             {
                 for member in c.body.members.iter() {
                     if let ClassMemberKind::Method(m) = &member.kind
@@ -256,10 +285,9 @@ fn find_param_sig_in_stmts(
                 }
             }
             StmtKind::Trait(t)
-                if class_name
-                    .as_ref()
-                    .map(|cn| cn == &t.name.to_string())
-                    .unwrap_or(false) =>
+                if class_name.is_some_and(|cn| {
+                    class_matches_declaration(cn, &t.name.to_string(), namespace)
+                }) =>
             {
                 for member in t.body.members.iter() {
                     if let ClassMemberKind::Method(m) = &member.kind
@@ -275,12 +303,16 @@ fn find_param_sig_in_stmts(
             }
             StmtKind::Namespace(ns) => {
                 if let NamespaceBody::Braced(inner) = &ns.body
-                    && let Some(r) = find_param_sig_in_stmts(
+                    && let Some(r) = find_param_sig_in_namespace(
                         source,
                         &inner.stmts,
                         callee_name,
                         class_name,
                         label,
+                        ns.name
+                            .as_ref()
+                            .map(|name| name.to_string_repr())
+                            .as_deref(),
                     )
                 {
                     return Some(r);
@@ -290,6 +322,21 @@ fn find_param_sig_in_stmts(
         }
     }
     None
+}
+
+/// Compare an already-resolved class identity with a declaration in one
+/// document. A short name is an intentional fallback; an FQCN must match both
+/// the namespace and the declaration name.
+fn class_matches_declaration(target: &str, declared: &str, namespace: Option<&str>) -> bool {
+    let target = target.trim_start_matches('\\');
+    if !target.contains('\\') {
+        return target.eq_ignore_ascii_case(declared);
+    }
+    let declared_fqcn = namespace
+        .filter(|ns| !ns.is_empty())
+        .map(|ns| format!("{ns}\\{declared}"))
+        .unwrap_or_else(|| declared.to_string());
+    target.eq_ignore_ascii_case(&declared_fqcn)
 }
 
 fn format_single_param(p: &Param<'_, '_>) -> String {

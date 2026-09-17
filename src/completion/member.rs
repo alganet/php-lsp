@@ -5,7 +5,7 @@ use mir_analyzer::AnalysisSession;
 use tower_lsp_server::ls_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
 use crate::document::ast::ParsedDoc;
-use crate::text::{fqn_short_name, utf16_offset_to_byte};
+use crate::text::utf16_offset_to_byte;
 use crate::types::stub_members::stub_class_members;
 use crate::types::type_map::{
     ClassMembers, enclosing_class_at, enum_backing_type, is_enum, members_of_class,
@@ -365,6 +365,23 @@ pub(super) fn resolve_receiver_class(
 
     // Handle (new ClassName()) before ->
     if let Some(class_name) = extract_new_class_before_arrow(before) {
+        // Preserve an explicit FQCN and expand a direct `use` alias before
+        // member lookup. `all_members` may use a short name only as a source
+        // spelling *within an already-selected document*; using one to select
+        // the document makes same-named classes ambiguous.
+        if class_name.starts_with('\\') || class_name.contains('\\') {
+            return Some(class_name.trim_start_matches('\\').to_owned());
+        }
+        let imports = doc.file_imports();
+        if let Some(fqcn) = imports.get(&class_name) {
+            return Some(fqcn.trim_start_matches('\\').to_owned());
+        }
+        if let Some((_, fqcn)) = imports
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(&class_name))
+        {
+            return Some(fqcn.trim_start_matches('\\').to_owned());
+        }
         return Some(class_name);
     }
 
@@ -399,9 +416,12 @@ pub(super) fn resolve_receiver_class(
 }
 
 /// Resolve the class(es) of a receiver variable from mir's recorded symbol at
-/// `var_offset` (a byte offset inside the variable token), returning short
-/// names for member lookup. A union receiver yields `Foo|Bar`. `None` if mir
-/// recorded no class-typed symbol there.
+/// `var_offset` (a byte offset inside the variable token), preserving fully
+/// qualified names for member lookup. A union receiver yields
+/// `App\\Foo|Vendor\\Bar`. Keeping the namespace is essential: the workspace
+/// can contain unrelated classes with the same short name, and
+/// `all_members` uses the FQCN to select the right defining document.
+/// Returns `None` if mir recorded no class-typed symbol there.
 pub(super) fn receiver_class_at(
     analysis: &mir_analyzer::FileAnalysis,
     var_offset: u32,
@@ -409,7 +429,7 @@ pub(super) fn receiver_class_at(
     let ty = crate::types::type_query::type_at_offset(analysis, var_offset)?;
     let names: Vec<String> = crate::types::type_query::class_names(ty)
         .iter()
-        .map(|fqcn| fqn_short_name(fqcn).to_string())
+        .cloned()
         .collect();
     (!names.is_empty()).then(|| names.join("|"))
 }
@@ -453,6 +473,7 @@ fn extract_new_class_before_arrow(text: &str) -> Option<String> {
     if class.is_empty() {
         return None;
     }
-    // Return short name
-    Some(fqn_short_name(&class).to_string())
+    // Keep the exact source spelling. The caller resolves imports and only
+    // accepts a short name when no stronger class identity is available.
+    Some(class)
 }

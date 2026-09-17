@@ -141,15 +141,13 @@ pub struct DocumentStore {
     /// via `$/php-lsp/debugStats` so tests can await a runtime-added folder's
     /// warm-start replay instead of guessing a fixed delay.
     warm_start_replays_completed: AtomicU64,
-    /// Files `warm_start_indexes` handed to a background reanalysis because
-    /// mir's `warm_start_files` flagged their replayed reference postings as
-    /// untrusted (a disk-cache replay of an unresolved-name commit — see
-    /// mir's 0.67.0 changelog entry). `Arc`-wrapped so the detached
-    /// reanalysis thread spawned by `warm_start_indexes` can bump it without
-    /// borrowing `self`. Observability only, surfaced via
+    /// Files the warm phase actually reanalyzed from the untrusted replay
+    /// subset (mir's `warm_start_files` flags a replayed file untrusted when
+    /// its disk-cache postings carry an unresolved name — see mir's 0.67.0
+    /// changelog entry). Observability only, surfaced via
     /// `$/php-lsp/debugStats` so a protocol test can assert the reanalysis
-    /// happened in the background, without ever issuing a query.
-    warm_start_untrusted_reanalyzed: Arc<AtomicU64>,
+    /// happened in the background warm phase, without ever issuing a query.
+    warm_start_untrusted_reanalyzed: AtomicU64,
     /// Throttled/idle-priority vendor warm-analysis sweeps run to completion
     /// (only meaningful when `warmVendorAnalysis: true` — see `LspConfig`).
     /// Always 0 until that sweep is implemented (ROADMAP 0c step 2,
@@ -225,7 +223,7 @@ impl DocumentStore {
             warm_sweep_cancel: Mutex::new(mir_analyzer::IndexCancel::new()),
             warm_sweeps_completed: AtomicU64::new(0),
             warm_start_replays_completed: AtomicU64::new(0),
-            warm_start_untrusted_reanalyzed: Arc::new(AtomicU64::new(0)),
+            warm_start_untrusted_reanalyzed: AtomicU64::new(0),
             vendor_warm_sweeps_completed: AtomicU64::new(0),
             interactive_reads: AtomicU64::new(0),
         }
@@ -330,7 +328,20 @@ impl DocumentStore {
             let _ = std::thread::Builder::new()
                 .name("php-lsp-warm-sweep".into())
                 .stack_size(64 * 1024 * 1024)
-                .spawn_scoped(s, || self.warm_analysis_sweep_inner(priority, cancel))
+                .spawn_scoped(s, || {
+                    let queue = self.sweep_candidate_files(priority);
+                    let untrusted: HashSet<Arc<str>> = HashSet::new();
+                    if self.run_warm_queue(&queue, &untrusted, cancel, None) {
+                        // The sweep staged each analyzed file's reference
+                        // postings into mir's AnalysisCache; persist them so
+                        // the next launch's `warm_start_indexes` replays
+                        // references index-warm. Flush before publishing
+                        // completion — observers of the counter may rely on
+                        // the postings being on disk.
+                        self.flush_analysis_cache();
+                        self.warm_sweeps_completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
                 .map(|h| h.join());
         });
     }
@@ -359,14 +370,40 @@ impl DocumentStore {
             .collect()
     }
 
-    fn warm_analysis_sweep_inner(&self, priority: &[Uri], cancel: &mir_analyzer::IndexCancel) {
+    /// Chunked reanalyze of `queue` with the sweep's yield/retry
+    /// discipline. Returns `true` only when the whole queue ran to
+    /// completion (no cancellation mid-pass) — callers publish completion
+    /// (cache flush + `warm_sweeps_completed`) on that basis, so an
+    /// observer of the counter can rely on every queued file having
+    /// settled; without the retry, a chunk silently skipped has no
+    /// guaranteed follow-up, and a caller polling the counter (e.g. a test
+    /// waiting for the reference index to be fully warm) can observe
+    /// "done" while some files' postings were never written.
+    ///
+    /// Bumps `warm_start_untrusted_reanalyzed` by the count of `untrusted`
+    /// files each chunk actually reanalyzed. `progress`, when given,
+    /// receives `(settled files, total files)` after each chunk.
+    fn run_warm_queue(
+        &self,
+        queue: &[Arc<str>],
+        untrusted: &HashSet<Arc<str>>,
+        cancel: &mir_analyzer::IndexCancel,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<(u32, u32)>>,
+    ) -> bool {
+        // Chunk size trades sweep throughput against how often the queue
+        // reaches a `yield_to_interactive_reads` boundary. Each boundary can
+        // sleep up to 500 ms while a request is in flight, so shrinking the
+        // chunk multiplies the worst-case stall rather than improving
+        // responsiveness; 32 files is one mir prepare+analyze pass.
         const CHUNK: usize = 32;
-        let files = self.sweep_candidate_files(priority);
         let session = self.current_analysis_session();
-        let mut all_chunks_settled = true;
-        for chunk in files.chunks(CHUNK) {
+        let total = queue.len() as u32;
+        let mut done: u32 = 0;
+        let mut all_settled = true;
+        'chunks: for chunk in queue.chunks(CHUNK) {
             if cancel.is_cancelled() {
-                return;
+                all_settled = false;
+                break;
             }
             self.yield_to_interactive_reads();
             // A concurrent write (e.g. another file being ingested) can land
@@ -375,35 +412,116 @@ impl DocumentStore {
             // cancellation) is the authoritative stop signal, so a retry loop
             // here only spins while an unrelated writer keeps landing, and
             // exits promptly once `cancel` itself flips (a real edit
-            // superseding this sweep). Without the retry, a chunk silently
-            // skipped here has no guaranteed follow-up: `warm_sweeps_completed`
-            // must not count this sweep as covering files it never actually
-            // analyzed, or a caller polling that counter (e.g. a test waiting
-            // for the reference index to be fully warm) can observe "done"
-            // while some files' postings were never written.
+            // superseding this sweep).
             loop {
                 if cancel.is_cancelled() {
-                    all_chunks_settled = false;
-                    break;
+                    all_settled = false;
+                    break 'chunks;
                 }
-                if salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                if let Ok(analyzed) = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
                     session.reanalyze_files_cancellable(chunk, cancel)
-                }))
-                .is_ok()
-                {
+                })) {
+                    done = done.saturating_add(chunk.len() as u32);
+                    if let Some(tx) = progress {
+                        let _ = tx.send((done, total));
+                    }
+                    if !untrusted.is_empty() {
+                        let n = analyzed
+                            .iter()
+                            .filter(|(f, _)| untrusted.contains(f.as_ref()))
+                            .count();
+                        if n > 0 {
+                            self.warm_start_untrusted_reanalyzed
+                                .fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                    }
                     break;
                 }
             }
         }
-        if !cancel.is_cancelled() && all_chunks_settled {
-            // The sweep staged each analyzed file's reference postings into
-            // mir's AnalysisCache; persist them so the next launch's
-            // `warm_start_indexes` replays references index-warm. Flush
-            // before publishing completion — observers of the counter may
-            // rely on the postings being on disk.
-            session.flush_analysis_cache();
-            self.warm_sweeps_completed.fetch_add(1, Ordering::Relaxed);
+        all_settled
+    }
+
+    /// The reference-warm phase: one deduped reanalysis queue holding the
+    /// `untrusted` replay subset first (files whose disk-cache postings
+    /// carry an unresolved name, so the first live query to touch one pays a
+    /// full synchronous `analyze_file`), then — when `ambient` — the project
+    /// sweep set with `priority` files at its front, so a file in both is
+    /// analyzed once rather than twice. Flushes the analysis cache and
+    /// counts as a completed warm sweep on full completion.
+    ///
+    /// Every caller runs this in the background *after* publishing
+    /// `indexReady`: it reanalyzes the whole project set, which on a real
+    /// workspace costs seconds, and no query needs it to have finished (a
+    /// cold file is analyzed on demand). Background-priority: yields to
+    /// interactive reads at chunk boundaries, stops at the next boundary
+    /// once a newer sweep takes the slot. Blocking; call from
+    /// `spawn_blocking`.
+    pub fn warm_references_phase(
+        &self,
+        untrusted: Vec<Arc<str>>,
+        priority: &[Uri],
+        ambient: bool,
+        progress: Option<tokio::sync::mpsc::UnboundedSender<(u32, u32)>>,
+    ) {
+        // Dedicated thread with a generous stack: the serial prepare phase
+        // and priority resolution recurse over real-world ASTs whose depth
+        // can exceed the default 2 MiB thread stack (debug builds
+        // especially). One pathological file must not abort the whole
+        // server process.
+        std::thread::scope(|s| {
+            let _ = std::thread::Builder::new()
+                .name("php-lsp-warm-phase".into())
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(s, || {
+                    self.warm_references_phase_inner(
+                        untrusted,
+                        priority,
+                        ambient,
+                        progress.as_ref(),
+                    )
+                })
+                .map(|h| h.join());
+        });
+    }
+
+    fn warm_references_phase_inner(
+        &self,
+        untrusted: Vec<Arc<str>>,
+        priority: &[Uri],
+        ambient: bool,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<(u32, u32)>>,
+    ) {
+        let untrusted_set: HashSet<Arc<str>> = untrusted.iter().cloned().collect();
+        let mut queue: Vec<Arc<str>> = Vec::with_capacity(untrusted.len());
+        let mut seen: HashSet<Arc<str>> = HashSet::new();
+        for f in untrusted.iter() {
+            if seen.insert(Arc::clone(f)) {
+                queue.push(Arc::clone(f));
+            }
         }
+        if ambient {
+            for f in self.sweep_candidate_files(priority) {
+                if seen.insert(Arc::clone(&f)) {
+                    queue.push(f);
+                }
+            }
+        }
+        if queue.is_empty() {
+            return;
+        }
+        let cancel = self.begin_warm_sweep();
+        let completed = self.run_warm_queue(&queue, &untrusted_set, &cancel, progress);
+        if !completed {
+            return;
+        }
+        // The phase staged each analyzed file's reference postings into
+        // mir's AnalysisCache; persist them so the next launch's
+        // `warm_start_indexes` replays them as trusted. Flush before
+        // publishing completion — observers of the counter may rely on the
+        // postings being on disk.
+        self.flush_analysis_cache();
+        self.warm_sweeps_completed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Persist mir's staged analysis-cache entries (reference postings) to
@@ -435,7 +553,7 @@ impl DocumentStore {
     /// files declaring the classes they reference (type hints, `use` imports,
     /// `new`, `extends`, …) — the set a request against an open file most
     /// likely touches. Resolution goes through the memoized workspace index,
-    /// matching by FQN first with an explicit short-name fallback.
+    /// matching only by canonical FQN.
     fn sweep_priority_files(&self, priority: &[Uri]) -> Vec<Arc<str>> {
         if priority.is_empty() {
             return Vec::new();
@@ -457,7 +575,7 @@ impl DocumentStore {
                 continue;
             };
             for fqn in crate::navigation::references::collect_referenced_class_fqns(&doc) {
-                if let Some(r) = self.resolve_class_ref_by_fqn_or_short_name_fallback(&ws, &fqn)
+                if let Some(r) = self.resolve_class_ref_by_fqn(&ws, &fqn)
                     && let Some((decl_uri, _)) = ws.at(r)
                 {
                     push(decl_uri, &mut out, &mut seen);
@@ -616,8 +734,7 @@ impl DocumentStore {
     ///
     /// Used by `goto_implementation` and `subtypes` to scope their lookups to
     /// the correct files, fixing aliased `extends` and FQN-qualified forms that
-    /// the mention-index-narrowed raw-name fallback (`subtypes_of_from_workspace`)
-    /// misses.
+    /// a raw textual search could miss.
     pub fn class_subtype_urls(&self, class_fqn: &str) -> Vec<tower_lsp_server::ls_types::Uri> {
         let session = self.current_analysis_session();
         session
@@ -1195,20 +1312,20 @@ impl DocumentStore {
     /// Replay disk-cached reference postings and subtype edges for the whole
     /// mirrored workspace (mir's `warm_start_files`) — a no-op per file
     /// without a content-hash-matching cache entry from a previous run. Call
-    /// once after the scan mirrors texts, before the analysis warm sweep, so
-    /// a returning session starts index-warm.
+    /// once after the scan mirrors texts, before the reference-warm phase,
+    /// so a returning session starts index-warm. Cheap enough to sit on the
+    /// pre-`indexReady` path — it replays cache entries, it does not analyze.
     ///
-    /// mir flags a subset of replayed files as untrusted — their postings
-    /// carry an unresolved name, so the first live query to touch one pays a
-    /// full synchronous `analyze_file` (mir's changelog measured ~1.3-1.5s on
-    /// a real 15K-file workspace). That subset is handed to a detached
-    /// background thread that reanalyzes them via `reanalyze_files_cancellable`
-    /// — the same call the ambient warm sweep uses — so the cost lands during
-    /// post-boot idle time instead of a user's first request. Not joined:
-    /// this method returns as soon as the replay itself is done, so callers
-    /// waiting on it (e.g. the `indexReady` gate) aren't blocked on the
-    /// reanalysis too.
-    pub fn warm_start_indexes(&self) {
+    /// Returns the subset of replayed files that mir flags as untrusted —
+    /// their postings carry an unresolved name, so the first live query to
+    /// touch one pays a full synchronous `analyze_file` (mir's changelog
+    /// measured ~1.3-1.5s on a real 15K-file workspace). The caller feeds
+    /// this list to the front of [`Self::warm_references_phase`]'s queue, so
+    /// the cost lands in the background warm phase instead of the user's
+    /// first request — and shares that phase's cancellation and
+    /// interactive-read yielding instead of racing requests on its own
+    /// detached thread.
+    pub fn warm_start_indexes(&self) -> Vec<Arc<str>> {
         let files: Vec<(Arc<str>, Arc<str>)> = self
             .lsp_ws_files
             .iter()
@@ -1219,25 +1336,13 @@ impl DocumentStore {
             })
             .collect();
         if files.is_empty() {
-            return;
+            return Vec::new();
         }
         let session = self.current_analysis_session();
         let untrusted = session.warm_start_files(&files);
         self.warm_start_replays_completed
             .fetch_add(1, Ordering::Relaxed);
-        if untrusted.is_empty() {
-            return;
-        }
-        let counter = Arc::clone(&self.warm_start_untrusted_reanalyzed);
-        let spawned = std::thread::Builder::new()
-            .name("php-lsp-warm-start-untrusted".into())
-            .stack_size(64 * 1024 * 1024)
-            .spawn(move || {
-                let cancel = mir_analyzer::IndexCancel::new();
-                let analyzed = session.reanalyze_files_cancellable(&untrusted, &cancel);
-                counter.fetch_add(analyzed.len() as u64, Ordering::Relaxed);
-            });
-        drop(spawned);
+        untrusted
     }
 
     /// Candidate file scope for a posting lookup on `symbol`.
@@ -1450,8 +1555,7 @@ impl DocumentStore {
 
         let ws = self.get_workspace_index_salsa();
         let owner_fqn = owner_fqn.trim_start_matches('\\');
-        let Some(owner_ref) = self.resolve_class_ref_by_fqn_or_short_name_fallback(&ws, owner_fqn)
-        else {
+        let Some(owner_ref) = self.resolve_class_ref_by_fqn(&ws, owner_fqn) else {
             // No project/vendor declaration matches this FQN — a builtin
             // owner (`Closure`, `ReflectionParameter`, ...) always lands
             // here, since PHP core/extension classes have no `FileIndex`
@@ -2227,6 +2331,25 @@ impl DocumentStore {
         Some(Arc::from(combined))
     }
 
+    /// Resolve only the codebase symbol identity at `offset` in `uri`.
+    ///
+    /// mir 0.72.1 provides this targeted navigation path so reference queries
+    /// do not need php-lsp's retained whole-file [`mir_analyzer::FileAnalysis`]
+    /// merely to call `symbol_at(...).kind.to_name()`. The interactive guard
+    /// pauses background writes; the retry covers a write already in flight.
+    pub fn mir_name_at(&self, uri: &Uri, offset: u32) -> Option<mir_analyzer::Name> {
+        let _interactive = self.interactive_read_guard();
+        let session = self.current_analysis_session();
+        loop {
+            match salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                session.name_at(uri.as_str(), offset)
+            })) {
+                Ok(name) => return name,
+                Err(_) => std::thread::yield_now(),
+            }
+        }
+    }
+
     /// Run (or reuse) mir's per-file body analysis, retaining the full
     /// [`mir_analyzer::FileAnalysis`] — issues **and** resolved symbols — across
     /// requests. Diagnostics read `.issues`; position features call
@@ -2617,27 +2740,6 @@ impl DocumentStore {
             .collect()
     }
 
-    /// Every class in the workspace whose own (unqualified) name is exactly
-    /// `short_name`, via mir's `classes_named` (O(1) short-name bucket,
-    /// incrementally maintained — no per-call scan over every workspace
-    /// file, unlike the mention-index-based narrowing this used to do).
-    ///
-    /// This is the explicit short-name fallback path. Prefer
-    /// [`Self::resolve_class_ref_by_fqn`] whenever the caller already has a
-    /// resolved FQN; use this only for true ambiguity handling where the
-    /// source text is still just a bare short name.
-    pub fn class_candidates_by_short_name(
-        &self,
-        wi: &crate::db::workspace_index::WorkspaceIndexData,
-        short_name: &str,
-    ) -> Vec<crate::db::workspace_index::ClassRef> {
-        self.current_analysis_session()
-            .classes_named(short_name)
-            .into_iter()
-            .filter_map(|(fqcn, _)| self.class_ref_by_fqn(wi, &fqcn))
-            .collect()
-    }
-
     /// O(1) resolution of a *known* FQN to its declaring class, via mir's own
     /// incrementally-maintained FQN→location index (`definition_of_cached`,
     /// backed by the same singleton `all_classes()`/`workspace_classes` read
@@ -2680,46 +2782,31 @@ impl DocumentStore {
         self.class_ref_by_fqn(wi, fqn)
     }
 
-    /// Resolve a bare short name to the first same-named class in the
-    /// workspace. This is intentionally the explicit fallback path.
-    pub fn resolve_class_ref_by_short_name(
-        &self,
-        wi: &crate::db::workspace_index::WorkspaceIndexData,
-        short_name: &str,
-    ) -> Option<crate::db::workspace_index::ClassRef> {
-        self.class_candidates_by_short_name(wi, short_name)
-            .first()
-            .copied()
-    }
-
-    /// Resolve a known FQN, falling back to the short-name bucket only when
-    /// mir's direct FQN lookup has not loaded/committed the class yet.
-    ///
-    /// Callers should use this only when they already have an FQN but still
-    /// want the previous resilience against a cold mir cache. New callers
-    /// should prefer [`Self::resolve_class_ref_by_fqn`] and reserve this for
-    /// compatibility with existing `FileIndex`-backed behavior.
-    pub fn resolve_class_ref_by_fqn_or_short_name_fallback(
+    /// O(1) resolution of a known FQN to its declaring global function via
+    /// mir's incrementally-maintained definition index. As with
+    /// [`Self::class_ref_by_fqn`], validate the result against the current
+    /// workspace snapshot before returning its compact index back-pointer.
+    pub fn function_ref_by_fqn(
         &self,
         wi: &crate::db::workspace_index::WorkspaceIndexData,
         fqn: &str,
-    ) -> Option<crate::db::workspace_index::ClassRef> {
+    ) -> Option<crate::db::workspace_index::FunctionRef> {
         let trimmed = fqn.trim_start_matches('\\');
-        if let Some(cr) = self.resolve_class_ref_by_fqn(wi, trimmed) {
-            return Some(cr);
-        }
-        let short = trimmed.rsplit('\\').next().unwrap_or(trimmed);
-        let candidates = self.class_candidates_by_short_name(wi, short);
-        if let Some(cr) = candidates.iter().find(|cr| {
-            wi.at(**cr).is_some_and(|(_, cls)| {
-                cls.fqn
-                    .trim_start_matches('\\')
-                    .eq_ignore_ascii_case(trimmed)
-            })
-        }) {
-            return Some(*cr);
-        }
-        candidates.first().copied()
+        let name = mir_analyzer::Name::function(trimmed.to_string());
+        let loc = self
+            .current_analysis_session()
+            .definition_of_cached(&name)
+            .ok()?;
+        let &file_idx = wi.path_to_file_idx.get(loc.file.as_ref())?;
+        let (_, idx) = wi.files.get(file_idx as usize)?;
+        let function_idx = idx
+            .functions
+            .iter()
+            .position(|function| function.fqn.trim_start_matches('\\') == trimmed)?;
+        Some(crate::db::workspace_index::FunctionRef {
+            file: file_idx,
+            function: function_idx as u32,
+        })
     }
 
     /// O(candidates) replacement for the old `decls_by_name`-backed linear

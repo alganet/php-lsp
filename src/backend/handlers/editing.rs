@@ -21,8 +21,7 @@ use crate::actions::update_phpdoc_action::update_phpdoc_actions;
 use crate::actions::visibility_action::change_visibility_actions;
 use crate::editing::organize_imports::organize_imports_action;
 use crate::editing::use_import::{
-    build_use_function_import_edit, build_use_import_edit, find_fqn_for_class,
-    find_fqn_for_function,
+    build_use_function_import_edit, build_use_import_edit, find_fqn_for_function,
 };
 
 use super::super::Backend;
@@ -71,11 +70,13 @@ impl Backend {
             let mut actions: Vec<CodeActionOrCommand> = Vec::new();
             let wi = docs.get_workspace_index_salsa();
             {
-                let class_candidates =
-                    |short: &str| docs.class_candidates_by_short_name(&wi, short);
-                let resolve_class_fqn = |cr| wi.at(cr).map(|(_, cls)| cls.fqn.to_string());
                 let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
                 let function_candidates = |name: &str| docs.declaration_candidate_files(&wi, name);
+                // An UndefinedClass diagnostic contains the namespace-resolved
+                // FQN (for example, `App\\Widget` for bare `Widget` in
+                // `namespace App`). Its exact lookup has failed, so offer an
+                // import only when the workspace contains a unique short-name
+                // candidate in another namespace.
                 for diag in &sem_diags {
                     if diag.code != Some(NumberOrString::String("UndefinedClass".to_string())) {
                         continue;
@@ -91,27 +92,25 @@ impl Backend {
                         .and_then(|s| s.strip_suffix(" does not exist"))
                         .unwrap_or("")
                         .trim();
-                    if resolved_name.is_empty() {
+                    if resolved_name.is_empty()
+                        || docs.resolve_class_ref_by_fqn(&wi, resolved_name).is_some()
+                    {
                         continue;
                     }
-                    // `resolved_name` is mir's namespace-resolved attempt (e.g. `App\Widget`
-                    // for a bare `Widget` reference inside `namespace App;`), not the token
-                    // the developer wrote — take the last segment to recover the short name
-                    // the workspace index stores classes under.
-                    let class_name = resolved_name.rsplit('\\').next().unwrap_or(resolved_name);
-                    if let Some(fqn) =
-                        find_fqn_for_class(class_name, &class_candidates, &resolve_class_fqn)
-                    {
-                        let edit = build_use_import_edit(&source, &uri, &fqn);
-                        let action = CodeAction {
-                            title: format!("Add use {fqn}"),
-                            kind: Some(CodeActionKind::QUICKFIX),
-                            edit: Some(edit),
-                            diagnostics: Some(vec![diag.clone()]),
-                            ..Default::default()
-                        };
-                        actions.push(CodeActionOrCommand::CodeAction(action));
-                    }
+                    let Some(class_name) = resolved_name.rsplit('\\').next() else {
+                        continue;
+                    };
+                    let Some(fqn) = wi.unique_class_fqn_by_short_name(class_name) else {
+                        continue;
+                    };
+                    let edit = build_use_import_edit(&source, &uri, &fqn);
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: format!("Add use {fqn}"),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        edit: Some(edit),
+                        diagnostics: Some(vec![diag.clone()]),
+                        ..Default::default()
+                    }));
                 }
 
                 // UndefinedFunction → use function FQN;
