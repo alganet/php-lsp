@@ -1143,6 +1143,48 @@ async fn code_action_only_organize_imports_excludes_quickfix() {
 }
 
 #[tokio::test]
+async fn code_action_only_source_includes_organize_imports_descendant() {
+    let mut server = TestServer::new().await;
+    server
+        .open(
+            "main.php",
+            "<?php\nnamespace App;\n\nuse App\\Zeta;\nuse App\\Alpha;\n\nnew Missing;\n",
+        )
+        .await;
+
+    let resp = server
+        .code_action_only("main.php", 6, 4, 6, 11, &["source"])
+        .await;
+    expect!["source.organizeImports Organize imports [edit]"]
+        .assert_eq(&render_code_actions(&resp));
+}
+
+#[tokio::test]
+async fn code_action_only_multiple_kinds_returns_their_actions() {
+    let mut server = TestServer::new().await;
+    server
+        .open(
+            "Service/Widget.php",
+            "<?php\nnamespace App\\Service;\n\nclass Widget {}\n",
+        )
+        .await;
+    server
+        .open(
+            "main.php",
+            "<?php\nnamespace App;\n\nuse App\\Zeta;\nuse App\\Alpha;\n\nnew Widget();\n",
+        )
+        .await;
+
+    let resp = server
+        .code_action_only("main.php", 6, 4, 6, 10, &["quickfix", "source"])
+        .await;
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        source.organizeImports Organize imports [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+}
+
+#[tokio::test]
 async fn code_action_only_returns_no_actions_when_no_kind_matches() {
     let mut server = TestServer::new().await;
     server.validate_syntax(false);
