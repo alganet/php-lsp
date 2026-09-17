@@ -20,7 +20,9 @@ use crate::actions::switch_to_match_action::switch_to_match_actions;
 use crate::actions::update_phpdoc_action::update_phpdoc_actions;
 use crate::actions::visibility_action::change_visibility_actions;
 use crate::editing::organize_imports::organize_imports_action;
-use crate::editing::use_import::{build_use_function_import_edit, find_fqn_for_function};
+use crate::editing::use_import::{
+    build_use_function_import_edit, build_use_import_edit, find_fqn_for_function,
+};
 
 use super::super::Backend;
 use super::super::helpers::{DEFERRED_ACTION_TAGS, defer_actions, generate_deferred_actions};
@@ -70,6 +72,47 @@ impl Backend {
             {
                 let get_doc = |uri: &Uri| docs.get_doc_salsa(uri);
                 let function_candidates = |name: &str| docs.declaration_candidate_files(&wi, name);
+                // An UndefinedClass diagnostic contains the namespace-resolved
+                // FQN (for example, `App\\Widget` for bare `Widget` in
+                // `namespace App`). Its exact lookup has failed, so offer an
+                // import only when the workspace contains a unique short-name
+                // candidate in another namespace.
+                for diag in &sem_diags {
+                    if diag.code != Some(NumberOrString::String("UndefinedClass".to_string())) {
+                        continue;
+                    }
+                    if diag.range.start.line < range.start.line
+                        || diag.range.start.line > range.end.line
+                    {
+                        continue;
+                    }
+                    let resolved_name = diag
+                        .message
+                        .strip_prefix("Class ")
+                        .and_then(|s| s.strip_suffix(" does not exist"))
+                        .unwrap_or("")
+                        .trim();
+                    if resolved_name.is_empty()
+                        || docs.resolve_class_ref_by_fqn(&wi, resolved_name).is_some()
+                    {
+                        continue;
+                    }
+                    let Some(class_name) = resolved_name.rsplit('\\').next() else {
+                        continue;
+                    };
+                    let Some(fqn) = wi.unique_class_fqn_by_short_name(class_name) else {
+                        continue;
+                    };
+                    let edit = build_use_import_edit(&source, &uri, &fqn);
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: format!("Add use {fqn}"),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        edit: Some(edit),
+                        diagnostics: Some(vec![diag.clone()]),
+                        ..Default::default()
+                    }));
+                }
+
                 // UndefinedFunction → use function FQN;
                 for diag in &sem_diags {
                     if diag.code != Some(NumberOrString::String("UndefinedFunction".to_string())) {

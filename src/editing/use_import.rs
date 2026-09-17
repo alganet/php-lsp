@@ -45,7 +45,6 @@ pub(crate) fn find_fqn_for_function(
 }
 
 /// Build a `WorkspaceEdit` that inserts `use FQN;` near the top of the file.
-#[cfg(test)]
 pub(crate) fn build_use_import_edit(source: &str, uri: &Uri, fqn: &str) -> WorkspaceEdit {
     let insert_line = find_use_insert_line(source);
     let insert_text = format!("use {fqn};\n");

@@ -1105,10 +1105,10 @@ async fn code_action_quickfix_undefined_function_cross_file() {
     .assert_eq(&out);
 }
 
-// --- UndefinedClass does not guess an import from a short name. ---
+// --- Quick-fix: UndefinedClass → use FQN; ---
 
-/// A workspace class with the same short name is not evidence that it is the
-/// intended missing FQN, so no import quick-fix is offered.
+/// A unique workspace class should be offered as an import even when its file
+/// is indexed but not open in the editor.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_not_open_in_editor() {
     let mut server = TestServer::with_fixture("psr4-mini").await;
@@ -1129,25 +1129,25 @@ async fn code_action_quickfix_undefined_class_not_open_in_editor() {
         .await;
 
     let resp = server.code_action("src/main.php", 2, 4, 2, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let action = actions
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Add use"))
-                .unwrap_or(false)
-        })
-        .cloned();
-
-    assert!(
-        action.is_none(),
-        "unexpected ambiguous import quick-fix: {resp:#}"
-    );
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+    let action = resp["result"].as_array().and_then(|actions| {
+        actions
+            .iter()
+            .find(|a| a["title"] == "Add use App\\Service\\Widget")
+    });
+    let action = action.expect("expected an Add use quick-fix");
+    let out = canonicalize_workspace_edit(&action["edit"], &server.uri(""));
+    expect![[r#"
+        // src/main.php
+        2:0-2:0 → "use App\\Service\\Widget;\n""#]]
+    .assert_eq(&out);
 }
 
-/// The namespace-resolved diagnostic FQN is retained; it is never reduced to
-/// a short name to find an arbitrary import candidate.
+/// The namespace-resolved diagnostic FQN is reduced to its short name only
+/// after exact resolution has failed, so a unique imported class is offered.
 #[tokio::test]
 async fn code_action_quickfix_undefined_class_in_namespaced_file() {
     let mut server = TestServer::new().await;
@@ -1162,31 +1162,51 @@ async fn code_action_quickfix_undefined_class_in_namespaced_file() {
         .await;
 
     let resp = server.code_action("main.php", 2, 4, 2, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let action = actions
-        .iter()
-        .find(|a| {
-            a["title"]
-                .as_str()
-                .map(|t| t.starts_with("Add use"))
-                .unwrap_or(false)
-        })
-        .cloned();
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
+    let action = resp["result"].as_array().and_then(|actions| {
+        actions
+            .iter()
+            .find(|a| a["title"] == "Add use App\\Service\\Widget")
+    });
+    let action = action.expect("expected an Add use quick-fix");
+    let out = canonicalize_workspace_edit(&action["edit"], &server.uri(""));
+    expect![[r#"
+        // main.php
+        2:0-2:0 → "use App\\Service\\Widget;\n""#]]
+    .assert_eq(&out);
+}
 
-    assert!(
-        action.is_none(),
-        "unexpected ambiguous import quick-fix: {resp:#}"
-    );
+/// Several classes with the same short name are ambiguous, so an import
+/// quick-fix must not guess between them.
+#[tokio::test]
+async fn code_action_quickfix_undefined_class_ambiguous_candidates_not_offered() {
+    let mut server = TestServer::new().await;
+    server
+        .open("A/Widget.php", "<?php\nnamespace A;\n\nclass Widget {}\n")
+        .await;
+    server
+        .open("B/Widget.php", "<?php\nnamespace B;\n\nclass Widget {}\n")
+        .await;
+    server
+        .open("main.php", "<?php\nnamespace App;\nnew Widget();\n")
+        .await;
+
+    let resp = server.code_action("main.php", 2, 4, 2, 10).await;
+    expect!["refactor.extract Extract variable [edit]"].assert_eq(&render_code_actions(&resp));
 }
 
 // ============================================================================
 // `context.only` FILTERING
 // ============================================================================
 //
-// `organize_imports_action` doesn't depend on the request range. An ambiguous
-// undefined class must not add an import quick-fix to the response.
+// `organize_imports_action` doesn't depend on the request range, so this
+// fixture offers it alongside the unique-class import quick-fix.
 
-/// Sanity check that the safe organize-imports action shows up unfiltered.
+/// Without `context.only`, both the quick-fix and organize-imports actions are
+/// returned (along with the applicable refactor).
 #[tokio::test]
 async fn code_action_only_absent_returns_both_kinds() {
     let mut server = TestServer::new().await;
@@ -1204,15 +1224,11 @@ async fn code_action_only_absent_returns_both_kinds() {
         .await;
 
     let resp = server.code_action("main.php", 6, 4, 6, 10).await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        kinds.contains(&"source.organizeImports"),
-        "expected an organize-imports action, got {kinds:?}"
-    );
+    expect![[r#"
+        quickfix         Add use App\Service\Widget [edit]
+        refactor.extract Extract variable [edit]
+        source.organizeImports Organize imports [edit]"#]]
+    .assert_eq(&render_code_actions(&resp));
 }
 
 #[tokio::test]
@@ -1234,12 +1250,8 @@ async fn code_action_only_quickfix_excludes_organize_imports() {
     let resp = server
         .code_action_only("main.php", 6, 4, 6, 10, &["quickfix"])
         .await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(kinds.is_empty(), "unexpected quickfixes: {kinds:?}");
+    expect!["quickfix         Add use App\\Service\\Widget [edit]"]
+        .assert_eq(&render_code_actions(&resp));
 }
 
 #[tokio::test]
@@ -1261,19 +1273,8 @@ async fn code_action_only_organize_imports_excludes_quickfix() {
     let resp = server
         .code_action_only("main.php", 6, 4, 6, 10, &["source.organizeImports"])
         .await;
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
-    let kinds: Vec<&str> = actions
-        .iter()
-        .map(|a| a["kind"].as_str().unwrap_or(""))
-        .collect();
-    assert!(
-        !kinds.is_empty(),
-        "expected the organize-imports action to survive filtering"
-    );
-    assert!(
-        kinds.iter().all(|k| *k == "source.organizeImports"),
-        "only=[source.organizeImports] should retain only organize-imports actions, got {kinds:?}"
-    );
+    expect!["source.organizeImports Organize imports [edit]"]
+        .assert_eq(&render_code_actions(&resp));
 }
 
 /// `only: ["refactor"]` must also match the more specific descendant kind

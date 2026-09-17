@@ -101,6 +101,30 @@ impl WorkspaceIndexData {
         Some((uri, cls))
     }
 
+    /// Return the canonical FQN when exactly one workspace class has `name`
+    /// as its short name. A duplicate FQN is harmless; distinct FQNs make a
+    /// short-name lookup ambiguous.
+    ///
+    /// This is deliberately a scan rather than another eager reverse map:
+    /// short-name disambiguation is only needed by infrequent interactive
+    /// operations, whereas completion needs its dedicated sorted index.
+    pub fn unique_class_fqn_by_short_name(&self, name: &str) -> Option<&str> {
+        let mut candidate = None;
+        for (_, index) in &self.files {
+            for class in &index.classes {
+                if !class.name.eq_ignore_ascii_case(name) {
+                    continue;
+                }
+                match candidate {
+                    None => candidate = Some(class.fqn.as_ref()),
+                    Some(fqn) if fqn.eq_ignore_ascii_case(&class.fqn) => {}
+                    Some(_) => return None,
+                }
+            }
+        }
+        candidate
+    }
+
     /// Visit every class-like declaration stored in the aggregate.
     pub fn for_each_class(&self, mut f: impl FnMut(&Uri, &crate::index::file_index::ClassDef)) {
         for (uri, idx) in &self.files {
